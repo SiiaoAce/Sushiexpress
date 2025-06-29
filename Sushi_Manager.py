@@ -6,63 +6,59 @@ import time
 import re
 import copy
 import csv
+import traceback
+from datetime import datetime, timedelta
+from collections import defaultdict
+from dateutil.parser import parse
 import customtkinter as ctk
 from PIL import Image, ImageTk, ImageDraw, ImageFont
 from tkinter import filedialog, messagebox, simpledialog
 from openpyxl import load_workbook, Workbook
 from openpyxl.utils import get_column_letter
-from datetime import datetime, timedelta
-from collections import defaultdict
-from dateutil.parser import parse
-import traceback
 
-# ======== 添加资源路径处理函数 ========
+# ======== 资源路径处理 ========
 def resource_path(relative_path):
     """获取资源文件的绝对路径"""
     try:
-        # PyInstaller创建的临时文件夹
         base_path = sys._MEIPASS
     except AttributeError:
         base_path = os.path.abspath(".")
-    
     return os.path.join(base_path, relative_path)
 
-# ========== Configuration ==========
-# 修改LOGO_PATH引用，使用resource_path函数
+# ========== 全局配置 ==========
 LOGO_PATH = resource_path("SELOGO22 - 01.png")
 PASSWORD = "OPS123"
-VERSION = "2.6.1"
+VERSION = "2.7.0"
 DEVELOPER = "OPS - Voon Kee"
 
-# Enhanced Theme Configuration
+# 主题配置
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-# ========== Enhanced Color Definitions with RGBA ==========
-DARK_BG = "#0f172a"         # Original: (15, 23, 42, 0.8)
-DARK_PANEL = "#1e293b"      # Original: (30, 41, 59, 0.8)
-ACCENT_BLUE = "#3b82f6"     # Original: (59, 130, 246, 0.8)
-BTN_HOVER = "#60a5fa"       # Original: (96, 165, 250, 0.8)
-ACCENT_GREEN = "#10b981"    # Original: (16, 185, 129, 0.8)
-ACCENT_RED = "#ef4444"      # Original: (239, 68, 68, 0.8)
-ACCENT_PURPLE = "#8b5cf6"   # Original: (139, 92, 246, 0.8)
-ENTRY_BG = "#334155"        # Original: (51, 65, 85, 0.8)
+# 颜色定义
+DARK_BG = "#0f172a"
+DARK_PANEL = "#1e293b"
+ACCENT_BLUE = "#3b82f6"
+BTN_HOVER = "#60a5fa"
+ACCENT_GREEN = "#10b981"
+ACCENT_RED = "#ef4444"
+ACCENT_PURPLE = "#8b5cf6"
+ENTRY_BG = "#334155"
 TEXT_COLOR = "#e2e8f0"
-PANEL_BG = "#1e293b"        # Same as DARK_PANEL
-TEXTBOX_BG = "#0f172a"      # Same as DARK_BG
+PANEL_BG = "#1e293b"
+TEXTBOX_BG = "#0f172a"
 
-# ========== Font Configuration (English in Italic) ==========
-FONT_TITLE = ("Microsoft JhengHei", 24, "bold")        # 中文标题（不变）
-FONT_BIGBTN = ("Microsoft JhengHei", 16, "bold")      # 中文按钮（不变）
-FONT_MID = ("Microsoft JhengHei", 14)                 # 中文正文（不变）
-FONT_SUB = ("Microsoft JhengHei", 12)                 # 中文辅助文字（不变）
-FONT_ZH = ("Microsoft JhengHei", 12)                  # 中文专用字体（不变）
-FONT_EN = ("Segoe UI", 11, "italic")                  # 英文改为斜体（添加 "italic"）
-FONT_LOG = ("Consolas", 14)                           # 日志字体（不变）
+# 字体配置
+FONT_TITLE = ("Microsoft JhengHei", 24, "bold")
+FONT_BIGBTN = ("Microsoft JhengHei", 16, "bold")
+FONT_MID = ("Microsoft JhengHei", 14)
+FONT_SUB = ("Microsoft JhengHei", 12)
+FONT_ZH = ("Microsoft JhengHei", 12)
+FONT_EN = ("Segoe UI", 11, "italic")
+FONT_LOG = ("Consolas", 14)
 
-# ========== Utility Functions ==========
+# ========== 多语言支持 ==========
 def t(text):
-    """Bilingual translation function"""
     translations = {
         "mapping_not_available": "分店供应商对应数据不可用\nOutlet-supplier mapping not available",
         "log_not_available": "日志数据不可用\nLog data not available",
@@ -117,26 +113,11 @@ def t(text):
     }
     return translations.get(text, text)
 
-def get_contrast_color(bg_color):
-    """Get contrasting text color for given background"""
-    if isinstance(bg_color, tuple) and len(bg_color) >= 3:
-        r, g, b = bg_color[:3]
-        luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        return "#191F2B" if luminance > 170 else "#F3F6FA"
-    else:
-        # Fallback for HEX colors
-        bg_color = bg_color.lstrip('#')
-        r = int(bg_color[0:2], 16)
-        g = int(bg_color[2:4], 16)
-        b = int(bg_color[4:6], 16)
-        luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        return "#191F2B" if luminance > 170 else "#F3F6FA"
-
+# ========== 工具函数 ==========
 def load_image(path, max_size=(400, 130)):
-    """Safely load image with error handling"""
+    """安全加载图像"""
     try:
         if not os.path.exists(path):
-            # Create a blank image if logo is missing
             img = Image.new('RGB', max_size, color=DARK_BG[:3])
             draw = ImageDraw.Draw(img)
             font = ImageFont.truetype("arial.ttf", 24)
@@ -149,9 +130,9 @@ def load_image(path, max_size=(400, 130)):
         print(f"Error loading image: {e}")
         return None
 
-# ========== Custom UI Components ==========
+# ========== 自定义UI组件 ==========
 class GlowButton(ctk.CTkButton):
-    """Button with glow effect and enhanced styling"""
+    """发光效果按钮"""
     def __init__(self, master, text=None, glow_color=ACCENT_BLUE, **kwargs):
         super().__init__(master, text=text, **kwargs)
         self._glow_color = glow_color
@@ -181,23 +162,20 @@ class GlowButton(ctk.CTkButton):
     
     @staticmethod
     def _adjust_color(color, amount):
-        """Adjust color brightness for RGBA tuples"""
         if isinstance(color, tuple) and len(color) >= 3:
-            # For RGBA tuples
             r, g, b = color[:3]
             adjusted = tuple(min(255, max(0, x + amount)) for x in (r, g, b))
             if len(color) == 4:
-                return adjusted + (color[3],)  # Keep alpha
+                return adjusted + (color[3],)
             return adjusted
         else:
-            # Fallback for HEX colors
             color = color.lstrip('#')
             rgb = tuple(int(color[i:i+2], 16) for i in (0, 2, 4))
             adjusted = tuple(min(255, max(0, x + amount)) for x in rgb)
             return f"#{adjusted[0]:02x}{adjusted[1]:02x}{adjusted[2]:02x}"
 
 class ProgressPopup(ctk.CTkToplevel):
-    """Popup window to show processing progress"""
+    """进度显示弹窗"""
     def __init__(self, parent, title):
         super().__init__(parent)
         self.title(title)
@@ -207,7 +185,6 @@ class ProgressPopup(ctk.CTkToplevel):
         self.parent = parent
         self.configure(fg_color=DARK_BG)
         
-        # Create log display
         self.log_text = ctk.CTkTextbox(
             self,
             wrap="word",
@@ -219,7 +196,6 @@ class ProgressPopup(ctk.CTkToplevel):
         self.log_text.pack(fill="both", expand=True, padx=20, pady=20)
         self.log_text.configure(state="disabled")
         
-        # Close button
         close_btn = GlowButton(
             self,
             text=t("close"),
@@ -230,19 +206,17 @@ class ProgressPopup(ctk.CTkToplevel):
         close_btn.pack(pady=10)
     
     def destroy_popup(self):
-        """Safely destroy the popup"""
         self.destroy()
         self.parent.progress_popup = None
     
     def log(self, message):
-        """Add message to log"""
         self.log_text.configure(state="normal")
         self.log_text.insert("end", message)
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
 class MappingPopup(ctk.CTkToplevel):
-    """Popup window to show outlet-supplier mapping"""
+    """分店-供应商映射显示"""
     def __init__(self, parent, title):
         super().__init__(parent)
         self.title(title)
@@ -252,7 +226,6 @@ class MappingPopup(ctk.CTkToplevel):
         self.parent = parent
         self.configure(fg_color=DARK_BG)
         
-        # Create mapping display
         self.mapping_text = ctk.CTkTextbox(
             self,
             wrap="word",
@@ -264,7 +237,6 @@ class MappingPopup(ctk.CTkToplevel):
         self.mapping_text.pack(fill="both", expand=True, padx=20, pady=20)
         self.mapping_text.configure(state="disabled")
         
-        # Close button
         close_btn = GlowButton(
             self,
             text=t("close"),
@@ -275,19 +247,17 @@ class MappingPopup(ctk.CTkToplevel):
         close_btn.pack(pady=10)
     
     def destroy_popup(self):
-        """Safely destroy the popup"""
         self.destroy()
         self.parent.mapping_popup = None
     
     def update_mapping(self, mapping):
-        """Update mapping display"""
         self.mapping_text.configure(state="normal")
         self.mapping_text.delete("1.0", "end")
         self.mapping_text.insert("1.0", mapping)
         self.mapping_text.configure(state="disabled")
 
 class ScrollableMessageBox(ctk.CTkToplevel):
-    """Scrollable message box for displaying long text"""
+    """可滚动消息框"""
     def __init__(self, parent, title, message):
         super().__init__(parent)
         self.title(title)
@@ -296,7 +266,6 @@ class ScrollableMessageBox(ctk.CTkToplevel):
         self.grab_set()
         self.configure(fg_color=DARK_BG)
         
-        # Create text box
         self.text_box = ctk.CTkTextbox(
             self,
             wrap="word",
@@ -309,7 +278,6 @@ class ScrollableMessageBox(ctk.CTkToplevel):
         self.text_box.insert("1.0", message)
         self.text_box.configure(state="disabled")
         
-        # Close button
         close_btn = GlowButton(
             self,
             text=t("close"),
@@ -319,9 +287,80 @@ class ScrollableMessageBox(ctk.CTkToplevel):
         )
         close_btn.pack(pady=10)
 
+class EmailConfirmationDialog(ctk.CTkToplevel):
+    """邮件发送确认对话框"""
+    def __init__(self, parent, mail_item, supplier_name, outlet_name, attachment_path, on_confirm):
+        super().__init__(parent)
+        self.title(f"确认邮件 - {supplier_name}")
+        self.geometry("800x600")
+        self.transient(parent)
+        self.grab_set()
+        self.mail_item = mail_item
+        self.on_confirm = on_confirm
+        self.attachment_path = attachment_path
+        
+        self.configure(fg_color=DARK_BG)
+        
+        info_frame = ctk.CTkFrame(self, fg_color=DARK_PANEL, corner_radius=12)
+        info_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkLabel(info_frame, text=f"收件人: {mail_item.To}", font=FONT_MID).pack(anchor="w", padx=10, pady=5)
+        ctk.CTkLabel(info_frame, text=f"主题: {mail_item.Subject}", font=FONT_MID).pack(anchor="w", padx=10, pady=5)
+        ctk.CTkLabel(info_frame, text=f"供应商: {supplier_name}", font=FONT_MID).pack(anchor="w", padx=10, pady=5)
+        ctk.CTkLabel(info_frame, text=f"分店: {outlet_name}", font=FONT_MID).pack(anchor="w", padx=10, pady=5)
+        
+        if attachment_path:
+            file_name = os.path.basename(attachment_path)
+            ctk.CTkLabel(info_frame, text=f"附件: {file_name}", font=FONT_MID).pack(anchor="w", padx=10, pady=5)
+        
+        body_frame = ctk.CTkFrame(self, fg_color=DARK_PANEL, corner_radius=12)
+        body_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        ctk.CTkLabel(body_frame, text="邮件正文:", font=FONT_BIGBTN).pack(anchor="w", padx=10, pady=5)
+        self.body_text = ctk.CTkTextbox(body_frame, wrap="word", height=200, font=FONT_MID)
+        self.body_text.pack(fill="both", expand=True, padx=10, pady=5)
+        self.body_text.insert("1.0", mail_item.Body)
+        
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkButton(
+            btn_frame, 
+            text="发送邮件", 
+            command=self._send_email,
+            fg_color=ACCENT_GREEN,
+            hover_color=BTN_HOVER
+        ).pack(side="right", padx=10)
+        
+        ctk.CTkButton(
+            btn_frame, 
+            text="取消", 
+            command=self.destroy
+        ).pack(side="right", padx=10)
+        
+        ctk.CTkButton(
+            btn_frame, 
+            text="编辑正文", 
+            command=self._edit_body,
+            fg_color=ACCENT_BLUE,
+            hover_color=BTN_HOVER
+        ).pack(side="left", padx=10)
+    
+    def _edit_body(self):
+        self.body_text.configure(state="normal")
+    
+    def _send_email(self):
+        try:
+            self.mail_item.Body = self.body_text.get("1.0", "end-1c")
+            self.mail_item.Send()
+            self.on_confirm(True, "邮件发送成功！")
+            self.destroy()
+        except Exception as e:
+            self.on_confirm(False, f"邮件发送失败: {str(e)}")
+
 # ========== 送货日期验证工具 ==========
 class DeliveryDateValidator:
-    """送货日期验证工具（支持分店特定规则）"""
+    """送货日期验证工具"""
     
     DAYS_MAPPING = {
         'mon': 0, 'monday': 0, '星期一': 0,
@@ -339,7 +378,7 @@ class DeliveryDateValidator:
             self.load_config(config_file)
     
     def load_config(self, config_file):
-        """加载供应商-分店送货日期配置"""
+        """加载送货日期配置"""
         try:
             with open(config_file, mode='r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
@@ -349,7 +388,6 @@ class DeliveryDateValidator:
                     days = self.parse_delivery_days(row['delivery_days'])
                     
                     if outlet == "ALL":
-                        # 适用于该供应商所有分店
                         self.schedule[supplier]['*'] = days
                     else:
                         self.schedule[supplier][outlet] = days
@@ -367,24 +405,20 @@ class DeliveryDateValidator:
 
     def get_delivery_days(self, supplier, outlet_code):
         """获取特定供应商-分店的送货日"""
-        # 先检查是否有分店特定规则
         outlet_specific = self.schedule.get(supplier, {}).get(outlet_code)
         if outlet_specific is not None:
             return outlet_specific
-        
-        # 检查是否有全局规则
         return self.schedule.get(supplier, {}).get('*', set())
 
     def validate_order(self, supplier, outlet_code, order_date, log_callback=None):
         """验证订单日期"""
         delivery_days = self.get_delivery_days(supplier, outlet_code)
         
-        if not delivery_days:  # 无限制则自动通过
+        if not delivery_days:
             return True
         
         try:
-            # 解析订单日期
-            if isinstance(order_date, (int, float)):  # Excel日期值
+            if isinstance(order_date, (int, float)):
                 order_date = datetime(1899, 12, 30) + timedelta(days=order_date)
             else:
                 order_date = parse(str(order_date), fuzzy=True)
@@ -413,12 +447,157 @@ class DeliveryDateValidator:
                'Friday', 'Saturday', 'Sunday']
         return ", ".join(days[d] for d in sorted(day_numbers))
 
-# ========== Order Automation Core ==========
+# ========== 统一配置管理器 ==========
+class UnifiedConfigManager:
+    """管理统一的Excel配置文件"""
+    
+    def __init__(self, config_path=None):
+        self.config_path = config_path
+        self.outlets = []
+        self.suppliers = []
+        self.delivery_schedule = []
+        self.email_templates = {}
+        self.supplier_requirements = {}
+        
+        if config_path:
+            self.load_config(config_path)
+    
+    def load_config(self, config_path):
+        """从Excel文件加载配置"""
+        try:
+            wb = load_workbook(config_path, data_only=True)
+            
+            # 读取分店信息
+            if "Outlets" in wb.sheetnames:
+                ws = wb["Outlets"]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if row and row[0]:
+                        self.outlets.append({
+                            "code": row[0].strip().upper(),
+                            "name": row[1].strip() if len(row) > 1 else "",
+                            "email": row[2].strip().lower() if len(row) > 2 else "",
+                            "address": row[3].strip() if len(row) > 3 else "",
+                            "delivery_day": row[4].strip() if len(row) > 4 else "",
+                            "brand": row[5].strip() if len(row) > 5 else "Dine-In"
+                        })
+            
+            # 读取供应商信息
+            if "Suppliers" in wb.sheetnames:
+                ws = wb["Suppliers"]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if row and row[0]:
+                        self.suppliers.append({
+                            "name": row[0].strip(),
+                            "email": row[1].strip().lower() if len(row) > 1 else "",
+                            "contact": row[2].strip() if len(row) > 2 else "",
+                            "phone": row[3].strip() if len(row) > 3 else ""
+                        })
+            
+            # 读取配送日程
+            if "Delivery Schedule" in wb.sheetnames:
+                ws = wb["Delivery Schedule"]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if row and row[0]:
+                        self.delivery_schedule.append({
+                            "supplier": row[0].strip(),
+                            "outlet_code": row[1].strip().upper() if row[1] != "ALL" else "ALL",
+                            "delivery_days": row[2].strip()
+                        })
+            
+            # 读取邮件模板
+            if "Email Templates" in wb.sheetnames:
+                ws = wb["Email Templates"]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if row and row[0]:
+                        self.email_templates[row[0].strip()] = {
+                            "subject": row[1].strip() if len(row) > 1 else "",
+                            "body": row[2].strip() if len(row) > 2 else ""
+                        }
+            
+            # 读取供应商要求
+            if "Supplier Requirements" in wb.sheetnames:
+                ws = wb["Supplier Requirements"]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if row and row[0]:
+                        supplier_name = row[0].strip()
+                        outlet_codes = [code.strip().upper() for code in str(row[1]).split(",") if code.strip()]
+                        
+                        if supplier_name not in self.supplier_requirements:
+                            self.supplier_requirements[supplier_name] = []
+                        
+                        self.supplier_requirements[supplier_name] = outlet_codes
+            
+            return True, f"成功加载配置文件: {len(self.outlets)} 分店, {len(self.suppliers)} 供应商"
+        except Exception as e:
+            return False, f"加载配置文件失败: {str(e)}"
+    
+    def get_outlet(self, code):
+        """根据分店代码获取分店信息"""
+        for outlet in self.outlets:
+            if outlet["code"] == code:
+                return outlet
+        return None
+    
+    def get_supplier(self, name):
+        """根据供应商名称获取供应商信息"""
+        for supplier in self.suppliers:
+            if supplier["name"] == name:
+                return supplier
+        return None
+    
+    def get_delivery_schedule(self, supplier, outlet_code):
+        """获取特定供应商-分店的配送日程"""
+        for schedule in self.delivery_schedule:
+            if schedule["supplier"] == supplier and schedule["outlet_code"] == outlet_code:
+                return schedule["delivery_days"]
+        
+        for schedule in self.delivery_schedule:
+            if schedule["supplier"] == supplier and schedule["outlet_code"] == "ALL":
+                return schedule["delivery_days"]
+        
+        return None
+    
+    def get_required_outlets(self, supplier_name):
+        """获取供应商必须包含的分店列表"""
+        return self.supplier_requirements.get(supplier_name, [])
+
+# ========== 邮件发送管理器 ==========
+class EmailSender:
+    """处理邮件发送功能"""
+    
+    def __init__(self, config_manager=None):
+        self.config_manager = config_manager
+    
+    def _get_standard_subject(self, supplier_name):
+        """生成标准邮件主题"""
+        now = datetime.now()
+        month_name = now.strftime("%B")
+        week_in_month = (now.day - 1) // 7 + 1
+        return f"Sushi Express Weekly Order - {supplier_name} - {month_name} - Week {week_in_month}"
+    
+    def send_email(self, recipient, supplier_name, body, attachment_path=None):
+        """使用Outlook发送邮件"""
+        try:
+            import win32com.client
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            mail = outlook.CreateItem(0)
+            
+            mail.To = recipient
+            mail.Subject = self._get_standard_subject(supplier_name)
+            mail.Body = body
+            
+            if attachment_path and os.path.exists(attachment_path):
+                mail.Attachments.Add(attachment_path)
+            
+            return mail
+        except Exception as e:
+            return None, f"创建邮件失败: {str(e)}"
+
+# ========== 订单自动化核心 ==========
 class OrderAutomation:
-    """订单自动化工具（已集成地址和日期检查）"""
+    """订单自动化工具"""
     
     OUTLET_LIST = [
-        # Sushi Express
         ("Sushi Express Century Square", "CSQ"),
         ("Sushi Express Clementi Mall", "TCM"),
         ("Sushi Express Funan", "FN"),
@@ -440,14 +619,12 @@ class OrderAutomation:
         ("Sushi Express White Sands", "WS"),
         ("Sushi Express Central Kitchen", "CK"),
         ("Sushi Express West Mall", "WM"),
-        # TakeOut
         ("Sushi TakeOut CityVibe (GTM)", "GTM"),
         ("Sushi TakeOut Tampines SMRT", "TSMRT"),
         ("Sushi TakeOut Woodlands", "WL"),
         ("Sushi TakeOut Toa Payoh", "TPY"),
-        # Sushi GOGO
         ("Sushi GOGO Junction 8", "J8"),
-        ("Sushi GOGO Hougang MRT", "HGTO"),  # Fixed HGTO mapping
+        ("Sushi GOGO Hougang MRT", "HGTO"),
         ("Sushi GOGO Oasis Terraces", "OASIS"),
         ("Sushi GOGO Sengkang MRT", "SKMRT"),
         ("Sushi GOGO Yew Tee Square", "YTS"),
@@ -457,7 +634,6 @@ class OrderAutomation:
         ("Sushi GOGO Bukit Gombak", "BGM"),
         ("Sushi GOGO Pasir Ris Mall", "PRM"),
         ("Sushi GOGO North Point City", "NPG"),
-        # SushiPlus
         ("SushiPlus Bugis", "Bugis"),
         ("SushiPlus 313 Somerset", "313"),
         ("SushiPlus Tampines One", "T1"),
@@ -465,31 +641,26 @@ class OrderAutomation:
 
     @staticmethod
     def get_short_code(f5val):
-        """Enhanced outlet code matching with HGTO fix"""
+        """获取分店简称"""
         val = (str(f5val) or "").strip().lower()
         
-        # 1. Exact match for full name
         for full, code in OrderAutomation.OUTLET_LIST:
             if full.lower() == val:
                 return code
         
-        # 2. Partial match (contains)
         for full, code in OrderAutomation.OUTLET_LIST:
             if full.lower() in val:
                 return code
         
-        # 3. Keyword match (last 2 keywords)
         for full, code in OrderAutomation.OUTLET_LIST:
             key_words = [x.lower() for x in full.split() if len(x) > 1]
             if key_words and all(kw in val for kw in key_words[-2:]):
                 return code
         
-        # 4. Code match
         for full, code in OrderAutomation.OUTLET_LIST:
             if code.lower() in val:
                 return code
         
-        # 5. Special handling for common issues
         special_cases = {
             "hougang mrt": "HGTO",
             "hgto": "HGTO",
@@ -504,15 +675,13 @@ class OrderAutomation:
             if pattern in val:
                 return code
         
-        # 6. Generate simplified code
         code = "".join([x for x in val if x.isalnum()])
         return code[:4].upper() if code else "UNKNOWN"
 
     @staticmethod
     def is_valid_date(cell_value, next_week_start, next_week_end):
-        """Check if cell value is a valid date within the target week"""
+        """检查是否为有效日期"""
         try:
-            # Handle Excel serial dates
             if isinstance(cell_value, (int, float)):
                 base_date = datetime(1899, 12, 30)
                 parsed = base_date + timedelta(days=cell_value)
@@ -525,8 +694,8 @@ class OrderAutomation:
 
     @classmethod
     def find_delivery_date_row(cls, ws, next_week_start, next_week_end, max_rows=150):
-        """Find row with delivery dates in columns F-K"""
-        valid_col_range = range(5, 12)  # Columns F to K
+        """查找送货日期行"""
+        valid_col_range = range(5, 12)
         invalid_labels = ["total", "total:", "sub-total", "sub-total:", "no. of cartons", "no. of cartons:"]
         
         found_blocks = []
@@ -542,7 +711,7 @@ class OrderAutomation:
         
         for header_row, cols in found_blocks:
             for row_idx in range(header_row + 1, header_row + 100):
-                label_cell = ws.cell(row=row_idx, column=5)  # Column E
+                label_cell = ws.cell(row=row_idx, column=5)
                 label = str(label_cell.value).lower().strip() if label_cell.value else ""
                 
                 if any(invalid in label for invalid in invalid_labels):
@@ -559,34 +728,31 @@ class OrderAutomation:
     def run_automation(cls, source_folder, supplier_folder, outlet_folder, 
                       outlet_config=None, delivery_config=None,
                       log_callback=None, mapping_callback=None):
-        """Complete order automation with exact formatting and HGTO fix"""
+        """运行订单自动化"""
         now = datetime.now()
         next_week_start = (now + timedelta(days=7 - now.weekday())).replace(hour=0, minute=0, second=0)
         next_week_end = next_week_start + timedelta(days=6)
         log_file = os.path.join(source_folder, f"order_log_{now.strftime('%Y%m%d_%H%M%S')}.txt")
         log_lines = [f"Scan Start Time: {now}\n", f"Target Week: {next_week_start.date()} to {next_week_end.date()}\n"]
         
-        # 初始化日期验证器
         date_validator = DeliveryDateValidator(delivery_config) if delivery_config else None
         
-        # 准备分店配置
         outlet_mapping = {}
         if outlet_config:
             try:
                 outlet_mapping = {o['short_name']: o for o in outlet_config}
-                log_callback(f"✅ 已加载分店配置: {len(outlet_mapping)} 个分店")
+                if log_callback:
+                    log_callback(f"✅ 已加载分店配置: {len(outlet_mapping)} 个分店")
             except Exception as e:
-                log_callback(f"⚠️ 分店配置加载失败: {str(e)}")
+                if log_callback:
+                    log_callback(f"⚠️ 分店配置加载失败: {str(e)}")
         
-        # Store outlet-supplier relationships
         supplier_to_outlets = defaultdict(list)
         outlet_to_suppliers = defaultdict(list)
         
-        # Ensure directories exist
         os.makedirs(supplier_folder, exist_ok=True)
         os.makedirs(outlet_folder, exist_ok=True)
         
-        # Log callback function
         def log(message, include_timestamp=True):
             timestamp = datetime.now().strftime("%H:%M:%S") if include_timestamp else ""
             log_line = f"[{timestamp}] {message}" if include_timestamp else message
@@ -594,7 +760,6 @@ class OrderAutomation:
             if log_callback:
                 log_callback(log_line + "\n")
         
-        # Mapping callback function
         def update_mapping():
             if mapping_callback:
                 mapping_text = "分店-供应商对应关系:\n"
@@ -602,7 +767,6 @@ class OrderAutomation:
                     mapping_text += f"{outlet}: {', '.join(suppliers)}\n"
                 mapping_callback(mapping_text)
         
-        # Process source folder files
         files = [f for f in os.listdir(source_folder) 
                  if f.endswith((".xlsx", ".xls")) and not f.startswith("~$")]
         total_files = len(files)
@@ -620,7 +784,6 @@ class OrderAutomation:
                 log(f"\n处理文件 {idx+1}/{total_files}: {file}")
                 wb = load_workbook(full_path, data_only=True)
                 
-                # 记录文件中的所有工作表
                 log(f"工作表: {', '.join(wb.sheetnames)}")
                 
                 for sheetname in wb.sheetnames:
@@ -629,19 +792,15 @@ class OrderAutomation:
                         log(f"  ⏩ 跳过隐藏工作表: {sheetname}")
                         continue
                     
-                    # 获取分店代码
                     f5_value = ws['F5'].value if 'F5' in ws else ws.cell(row=5, column=6).value
                     outlet_short = cls.get_short_code(f5_value)
                     log(f"  Sheet: {sheetname}, F5 Value: '{f5_value}', Short Code: {outlet_short}")
                     
-                    # ====== 新增: 地址一致性检查 ======
                     if outlet_mapping:
                         outlet_info = outlet_mapping.get(outlet_short)
                         if outlet_info:
-                            # 获取工作表地址 (F6单元格)
                             sheet_address = ws['F6'].value if 'F6' in ws else None
                             if sheet_address:
-                                # 标准化地址比较
                                 def normalize(addr):
                                     return re.sub(r'[^a-zA-Z0-9]', '', str(addr).lower())
                                 
@@ -652,12 +811,9 @@ class OrderAutomation:
                                     log(f"  ❌ 地址不匹配: {outlet_short}")
                                     log(f"    配置地址: {outlet_info.get('address', '')}")
                                     log(f"    工作表地址: {sheet_address}")
-                                    # 标记问题但不停止处理
                                     outlet_short = f"{outlet_short} (地址错误)"
                     
-                    # ====== 新增: 送货日期检查 ======
                     if date_validator:
-                        # 获取送货日期 (F8单元格)
                         delivery_date = ws['F8'].value if 'F8' in ws else None
                         if delivery_date:
                             is_valid = date_validator.validate_order(
@@ -669,16 +825,14 @@ class OrderAutomation:
                         else:
                             log(f"  ⚠️ {outlet_short}: 未找到送货日期(F8)")
                     
-                    # 查找送货日期行
                     header_row, target_cols = cls.find_delivery_date_row(ws, next_week_start, next_week_end)
                     
                     has_order = False
                     if target_cols:
                         log(f"    Found delivery dates at row {header_row}, columns {[get_column_letter(c) for c in target_cols]}")
                         
-                        # 检查订单数量
                         for row_idx in range(header_row + 1, header_row + 100):
-                            label_cell = ws.cell(row=row_idx, column=5)  # Column E
+                            label_cell = ws.cell(row=row_idx, column=5)
                             label = str(label_cell.value).lower().strip() if label_cell.value else ""
                             
                             if any(invalid in label for invalid in ["total", "sub-total", "no. of cartons"]):
@@ -706,14 +860,12 @@ class OrderAutomation:
                 error_msg = f"❌ Error processing {file}: {str(e)}\n{traceback.format_exc()}"
                 log(error_msg)
         
-        # 记录分店-供应商关系
         log("\nOutlet-Supplier Mapping:")
         mapping_text = ""
         for outlet, suppliers in outlet_to_suppliers.items():
             log(f"  {outlet}: {', '.join(suppliers)}")
             mapping_text += f"{outlet}: {', '.join(suppliers)}\n"
         
-        # 更新映射回调
         if mapping_callback:
             mapping_callback(mapping_text)
 
@@ -722,13 +874,12 @@ class OrderAutomation:
             outlet_list = [o[0] for o in outlets]
             log(f"  {supplier}: {', '.join(outlet_list)}")
 
-        # SUPPLIER 合併 - 创建供应商文件
         log("\nCreating supplier files...")
         supplier_files = []
         for sheetname, outlet_file_pairs in supplier_to_outlets.items():
             supplier_path = os.path.join(supplier_folder, f"{sheetname}_Week_{next_week_start.strftime('%V')}.xlsx")
             new_wb = Workbook()
-            new_wb.remove(new_wb.active)  # 删除默认sheet
+            new_wb.remove(new_wb.active)
             
             log(f"Creating supplier file for {sheetname} at {supplier_path}")
             
@@ -738,20 +889,16 @@ class OrderAutomation:
                     src_wb = load_workbook(src_file, data_only=False)
                     src_ws = src_wb[original_sheet]
                     
-                    # 跳过隐藏的工作表
                     if src_ws.sheet_state != "visible":
                         log(f"    ⏩ Skipping hidden sheet: {original_sheet}")
                         continue
                     
-                    # 创建新工作表
                     target_ws = new_wb.create_sheet(title=outlet)
                     
-                    # 复制所有行和列
                     for row in src_ws.iter_rows():
                         for cell in row:
                             new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
                             
-                            # 复制样式
                             if cell.has_style:
                                 new_cell.font = copy.copy(cell.font)
                                 new_cell.border = copy.copy(cell.border)
@@ -760,16 +907,13 @@ class OrderAutomation:
                                 new_cell.protection = copy.copy(cell.protection)
                                 new_cell.alignment = copy.copy(cell.alignment)
                     
-                    # 复制列宽
                     for col_idx in range(1, src_ws.max_column + 1):
                         col_letter = get_column_letter(col_idx)
                         target_ws.column_dimensions[col_letter].width = src_ws.column_dimensions[col_letter].width
                     
-                    # 复制行高
                     for row_idx in range(1, src_ws.max_row + 1):
                         target_ws.row_dimensions[row_idx].height = src_ws.row_dimensions[row_idx].height
                     
-                    # 复制合并单元格
                     for merged_range in src_ws.merged_cells.ranges:
                         target_ws.merge_cells(str(merged_range))
                         
@@ -785,7 +929,6 @@ class OrderAutomation:
                 error_msg = f"    ❌ Failed to save {sheetname} file: {str(e)}"
                 log(error_msg)
 
-        # OUTLET 合併 - 创建分店文件
         log("\nCreating outlet files...")
         outlet_files = []
         outlet_to_sheets = defaultdict(list)
@@ -796,7 +939,7 @@ class OrderAutomation:
         for outlet, supplier_sheets in outlet_to_sheets.items():
             out_path = os.path.join(outlet_folder, f"{outlet}_Week_{next_week_start.strftime('%V')}.xlsx")
             out_wb = Workbook()
-            out_wb.remove(out_wb.active)  # 删除默认sheet
+            out_wb.remove(out_wb.active)
             
             log(f"Creating outlet file for {outlet} at {out_path}")
             
@@ -806,16 +949,17 @@ class OrderAutomation:
                     src_wb = load_workbook(src_file, data_only=False)
                     src_ws = src_wb[original_sheet]
                     
-                    # 创建新工作表（限制工作表名称为31字符）
                     sheet_title = supplier[:31]
                     target_ws = out_wb.create_sheet(title=sheet_title)
                     
-                    # 复制所有行和列
                     for row in src_ws.iter_rows():
                         for cell in row:
-                            new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+                            new_cell = target_ws.cell(
+                                row=cell.row, 
+                                column=cell.column, 
+                                value=cell.value
+                            )
                             
-                            # 复制样式
                             if cell.has_style:
                                 new_cell.font = copy.copy(cell.font)
                                 new_cell.border = copy.copy(cell.border)
@@ -824,16 +968,13 @@ class OrderAutomation:
                                 new_cell.protection = copy.copy(cell.protection)
                                 new_cell.alignment = copy.copy(cell.alignment)
                     
-                    # 复制列宽
                     for col_idx in range(1, src_ws.max_column + 1):
                         col_letter = get_column_letter(col_idx)
                         target_ws.column_dimensions[col_letter].width = src_ws.column_dimensions[col_letter].width
                     
-                    # 复制行高
                     for row_idx in range(1, src_ws.max_row + 1):
                         target_ws.row_dimensions[row_idx].height = src_ws.row_dimensions[row_idx].height
                     
-                    # 复制合并单元格
                     for merged_range in src_ws.merged_cells.ranges:
                         target_ws.merge_cells(str(merged_range))
                         
@@ -849,7 +990,6 @@ class OrderAutomation:
                 error_msg = f"    ❌ Failed to save outlet file for {outlet}: {str(e)}"
                 log(error_msg)
 
-        # 添加分店文件列表到日志
         result_text = "\n订单整合结果:\n"
         result_text += f"已处理供应商文件: {len(supplier_files)}\n"
         result_text += f"已处理分店文件: {len(outlet_files)}\n\n"
@@ -859,7 +999,6 @@ class OrderAutomation:
         
         log(result_text)
         
-        # 保存日志文件
         try:
             with open(log_file, "w", encoding="utf-8") as logfile:
                 logfile.writelines(log_lines)
@@ -869,12 +1008,16 @@ class OrderAutomation:
             log(f"❌ Failed to write log file: {e}")
             return False, f"订单整合完成但日志保存失败:\n{str(e)}"
 
-# ========== Order Checker Core ==========
-class OrderChecker:
-    """Order checklist tool with enhanced output"""
+# ========== 增强版订单检查器 ==========
+class EnhancedOrderChecker:
+    """使用配置文件的订单检查器"""
+    
+    def __init__(self, config_manager=None):
+        self.config_manager = config_manager
+    
     @staticmethod
     def get_outlet_shortname(f5_value):
-        """Get outlet short name from Excel F5 value"""
+        """获取分店简称"""
         if not f5_value or not isinstance(f5_value, str):
             return "[EMPTY]"
 
@@ -928,47 +1071,35 @@ class OrderChecker:
                 return short
         return f"[UNKNOWN] {f5_value}"
 
-    @classmethod
-    def run_checklist(cls, folder, delivery_config=None, log_callback=None):
-        """Run supplier checklist with enhanced output"""
-        # 初始化日期验证器
+    def run_checklist(self, folder, delivery_config=None, log_callback=None):
+        """运行检查表"""
         date_validator = DeliveryDateValidator(delivery_config) if delivery_config else None
         
-        supplier_keywords = {
-            "Chang Cheng": ["chang cheng"],
-            "Super Q": ["super q"],
-            "Super Q Chawan": ["super q chaw", "chawan", "super q chawan"],
-            "Oriental": ["oriental"],
-            "Aries": ["aries"],
-            "Evershine": ["evershine"],
-            "Perfect Choice": ["perfect choice"]
-        }
+        supplier_keywords = {}
+        if self.config_manager:
+            for supplier in self.config_manager.suppliers:
+                supplier_keywords[supplier["name"]] = [supplier["name"].lower()]
         
-        must_have_outlets = {
-            "Chang Cheng": ["GTM", "HGTO", "TPC", "YTS", "TSMRT", "CSQ", "HBB", "HLM", "PLQ", "WS", "SM",
-                          "HGM", "WWP", "WG", "NEX", "SP", "CK", "BGM", "CBP", "HM", "Bugis", "PP", "FN", "WL", "PRM"],
-            "Super Q": ["AMK", "OAS", "J8", "SKMRT", "SKG", "TCM", "NPC", "IMM", "JP", "TPY", "NPG", "WM"],
-            "Super Q Chawan": ["AMK", "WG", "NPC", "SP", "SKG", "WWP", "HGM", "WL", "HGTO", "SKMRT", "TPC", "BGM",
-                              "NPG", "TCM", "IMM", "J8", "JP", "OAS", "TSMRT", "TPY", "WM"],
-            "Oriental": ["313", "Bugis", "HGTO", "TPC", "WL", "HLM", "PLQ", "HGM", "SKG", "T1"],
-            "Aries": ["AMK", "J8", "TPY", "CSQ", "HBB", "PP", "WS", "SM", "WWP", "FN", "IMM", "JP",
-                     "WG", "NEX", "OAS", "CK", "WM"],
-            "Evershine": ["YTS", "GTM", "TCM", "SKMRT", "TSMRT", "HM", "NPC", "SP", "NPG"],
-            "Perfect Choice": ["GTM", "CBP", "FN", "CSQ", "WS", "HBB", "PLQ", "PP", "HM", "HLM", "NEX", "SM", "YTS"]
-        }
+        must_have_outlets = {}
+        if self.config_manager:
+            for supplier in self.config_manager.suppliers:
+                must_have_outlets[supplier["name"]] = self.config_manager.get_required_outlets(supplier["name"])
         
         try:
             files = [f for f in os.listdir(folder) if f.endswith(".xlsx") and not f.startswith("~$")]
-            normalized_files = {cls._normalize(f): f for f in files}
+            normalized_files = {self._normalize(f): f for f in files}
             output = []
             
             for supplier, keywords in supplier_keywords.items():
-                match = cls._find_supplier_file(normalized_files, keywords)
+                match = self._find_supplier_file(normalized_files, keywords)
                 if not match:
                     output.append(f"\n❌ {supplier} - Supplier file not found.")
                     continue
                 
-                result = cls._process_supplier_file(folder, match, must_have_outlets[supplier], date_validator, log_callback)
+                result = self._process_supplier_file(
+                    folder, match, must_have_outlets[supplier], 
+                    date_validator, log_callback
+                )
                 output.extend(result)
             
             return "\n".join(output)
@@ -977,12 +1108,12 @@ class OrderChecker:
 
     @staticmethod
     def _normalize(text):
-        """Normalize text for matching"""
+        """标准化文本"""
         return re.sub(r'[\s\(\)]', '', text.lower())
 
     @classmethod
     def _find_supplier_file(cls, normalized_files, keywords):
-        """Find supplier file"""
+        """查找供应商文件"""
         for k in keywords:
             nk = cls._normalize(k)
             for nf, of in normalized_files.items():
@@ -992,7 +1123,7 @@ class OrderChecker:
 
     @classmethod
     def _process_supplier_file(cls, folder, filename, required_outlets, date_validator=None, log_callback=None):
-        """Process supplier file with date validation"""
+        """处理供应商文件"""
         output = []
         found = set()
         unidentified = []
@@ -1008,9 +1139,7 @@ class OrderChecker:
                     else:
                         found.add(code)
                     
-                    # ====== 新增: 送货日期检查 ======
                     if date_validator:
-                        # 获取送货日期 (F8单元格)
                         delivery_date = wb[s]['F8'].value if 'F8' in wb[s] else None
                         if delivery_date:
                             is_valid = date_validator.validate_order(
@@ -1040,9 +1169,427 @@ class OrderChecker:
         
         return output
 
-# ========== Outlook Downloader Core ==========
+# ========== 增强版订单自动化 ==========
+class EnhancedOrderAutomation(OrderAutomation):
+    """支持邮件发送的订单自动化"""
+    
+    def __init__(self, config_manager=None):
+        super().__init__()
+        self.config_manager = config_manager
+        self.email_sender = EmailSender(config_manager)
+    
+    def run_automation(self, source_folder, supplier_folder, outlet_folder, 
+                      log_callback=None, mapping_callback=None, 
+                      email_callback=None):
+        """运行自动化流程"""
+        success, result = super().run_automation(
+            source_folder, supplier_folder, outlet_folder,
+            log_callback, mapping_callback
+        )
+        
+        if not success:
+            return success, result
+        
+        supplier_files = []
+        for file in os.listdir(supplier_folder):
+            if file.endswith(".xlsx") and "Week" in file:
+                supplier_name = file.split("_")[0]
+                supplier_files.append({
+                    "path": os.path.join(supplier_folder, file),
+                    "supplier": supplier_name
+                })
+        
+        if self.config_manager and email_callback:
+            email_callback(supplier_files)
+        
+        return success, result
+
+# ========== 主应用程序 ==========
+class SushiExpressApp(ctk.CTk):
+    """主应用程序"""
+    
+    def __init__(self):
+        super().__init__()
+        self.title(f"Sushi Express Automation Tool v{VERSION}")
+        self.geometry("1200x900")
+        self.minsize(1000,800)
+        self.configure(fg_color=DARK_BG)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # 初始化变量
+        self.download_folder_var = None
+        self.checklist_folder_var = None
+        self.folder_vars = {}
+        self.master_file_var = None
+        self.output_folder_var = None
+        self.progress_popup = None
+        self.mapping_popup = None
+        self.outlet_config_var = None
+        self.delivery_config_var = None
+        self.email_dialogs = []
+
+        self._setup_ui()
+        self.show_login()
+
+    def _setup_ui(self):
+        """设置UI布局"""
+        self.main_container = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_container.pack(fill="both", expand=True, padx=20, pady=20)
+
+        # 头部
+        self.header_frame = ctk.CTkFrame(self.main_container, fg_color=DARK_PANEL, corner_radius=24, height=150)
+        self.header_frame.pack(fill="x", padx=10, pady=10)
+        
+        self.logo_img = load_image(LOGO_PATH)
+        if self.logo_img:
+            ctk.CTkLabel(self.header_frame, image=self.logo_img, text="").pack(expand=True)
+        
+        self.title_label = ctk.CTkLabel(self.header_frame, text="", font=FONT_TITLE, text_color=ACCENT_BLUE)
+        self.subtitle_label = ctk.CTkLabel(self.header_frame, text="", font=FONT_SUB, text_color=TEXT_COLOR)
+        self.title_label.pack()
+        self.subtitle_label.pack()
+
+        # 按钮区域
+        self.buttons_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.buttons_frame.pack(fill="x", padx=10, pady=10)
+
+        # 内容区域
+        self.content_frame = ctk.CTkFrame(self.main_container, fg_color=DARK_PANEL, corner_radius=24)
+        self.content_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        self.content_frame.pack_propagate(False)
+
+    def _on_close(self):
+        """关闭应用程序确认"""
+        if messagebox.askyesno(t("exit_system"), t("exit_confirm")):
+            self.destroy()
+
+    def show_login(self):
+        """显示登录界面"""
+        for w in self.content_frame.winfo_children(): w.destroy()
+        self.login_frame = ctk.CTkFrame(self.content_frame, fg_color=DARK_PANEL, corner_radius=24, width=450, height=400)
+        self.login_frame.place(relx=0.5, rely=0.5, anchor="center")
+        self.pwd_entry = ctk.CTkEntry(self.login_frame, show="*", font=FONT_SUB, width=300, placeholder_text=t("password"), fg_color=ENTRY_BG, height=45)
+        self.pwd_entry.pack(pady=(20,10))
+        self.pwd_entry.bind("<Return>", lambda e: self._try_login())
+        ctk.CTkButton(self.login_frame, text=t("login_btn"), command=self._try_login, width=200).pack(pady=(0,20))
+        ctk.CTkLabel(self.login_frame, text=f"Version {VERSION} | {DEVELOPER}", font=("Consolas",12), text_color="#64748B").pack(side="bottom", pady=10)
+
+    def _try_login(self):
+        """尝试登录"""
+        if self.pwd_entry.get() == PASSWORD:
+            self.login_frame.destroy()
+            self.show_main_menu()
+        else:
+            messagebox.showerror(t("error"), t("incorrect_pw"))
+
+    def show_main_menu(self):
+        """显示主菜单"""
+        for w in self.content_frame.winfo_children(): w.destroy()
+        self.title_label.configure(text=t("main_title"))
+        self.subtitle_label.configure(text=t("select_function"))
+        
+        for w in self.buttons_frame.winfo_children(): w.destroy()
+        
+        funcs = [ (t("download_title"), self.show_download_ui),
+                  (t("checklist_title"), self.show_checklist_ui),
+                  (t("automation_title"), self.show_automation_ui),
+                  ("營運用品月訂單", self.show_operation_supplies_ui),
+                  (t("exit_system"), self._on_close) ]
+        
+        for text, cmd in funcs:
+            btn = ctk.CTkButton(self.buttons_frame, text=text, command=cmd)
+            btn.pack(side="left", padx=10, pady=10, expand=True)
+
+    def show_function_ui(self, title, subtitle, content_callback):
+        """显示功能界面"""
+        for w in self.content_frame.winfo_children(): w.destroy()
+        self.title_label.configure(text=title)
+        self.subtitle_label.configure(text=subtitle)
+        content = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=20, pady=20)
+        content_callback(content)
+        ctk.CTkButton(self.content_frame, text=t("back_to_menu"), command=self.show_main_menu).pack(pady=10)
+
+    def show_download_ui(self):
+        """显示下载界面"""
+        def build(c):
+            self.download_folder_var = ctk.StringVar()
+            self.config_file_var = ctk.StringVar()
+            
+            row1 = ctk.CTkFrame(c)
+            row1.pack(fill="x", pady=5)
+            ctk.CTkLabel(row1, text="下载文件夹:").pack(side="left")
+            ctk.CTkEntry(row1, textvariable=self.download_folder_var, state="readonly").pack(side="left", expand=True, fill="x", padx=5)
+            ctk.CTkButton(row1, text=t("browse"), command=self._select_download_folder).pack(side="left")
+            
+            row2 = ctk.CTkFrame(c)
+            row2.pack(fill="x", pady=5)
+            ctk.CTkLabel(row2, text="分店配置文件 (可选):").pack(side="left")
+            ctk.CTkEntry(row2, textvariable=self.config_file_var, state="readonly").pack(side="left", expand=True, fill="x", padx=5)
+            ctk.CTkButton(row2, text=t("browse"), command=self._select_config_file).pack(side="left")
+            
+            ctk.CTkButton(c, text=t("start_download"), command=self._run_download).pack(pady=20)
+        
+        self.show_function_ui(t("download_title"), t("download_desc"), build)
+
+    def _select_download_folder(self):
+        """选择下载文件夹"""
+        f = filedialog.askdirectory(title=t("select_folder"))
+        if f: self.download_folder_var.set(f)
+    
+    def _select_config_file(self):
+        """选择配置文件"""
+        f = filedialog.askopenfilename(
+            title="选择分店配置文件",
+            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
+        )
+        if f: 
+            self.config_file_var.set(f)
+
+    def _run_download(self):
+        """运行下载"""
+        folder = self.download_folder_var.get()
+        if not folder:
+            messagebox.showwarning(t("warning"), t("folder_warning"))
+            return
+        
+        config_file = self.config_file_var.get() or None
+        OutlookDownloader.download_weekly_orders(
+            folder, 
+            config_file=config_file,
+            callback=lambda msg: messagebox.showinfo(t("download_summary"), msg)
+        )
+
+    def show_checklist_ui(self):
+        """显示检查表界面"""
+        def build(c):
+            self.checklist_folder_var = ctk.StringVar()
+            self.delivery_config_var = ctk.StringVar()
+            self.master_config_var = ctk.StringVar()
+            
+            row1 = ctk.CTkFrame(c)
+            row1.pack(fill="x", pady=5)
+            ctk.CTkLabel(row1, text="订单文件夹:").pack(side="left")
+            ctk.CTkEntry(row1, textvariable=self.checklist_folder_var, state="readonly").pack(side="left", expand=True, fill="x", padx=5)
+            ctk.CTkButton(row1, text=t("browse"), command=self._select_checklist_folder).pack(side="left")
+            
+            row2 = ctk.CTkFrame(c)
+            row2.pack(fill="x", pady=5)
+            ctk.CTkLabel(row2, text="送货日期配置 (可选):").pack(side="left")
+            ctk.CTkEntry(row2, textvariable=self.delivery_config_var, state="readonly").pack(side="left", expand=True, fill="x", padx=5)
+            ctk.CTkButton(row2, text=t("browse"), command=self._select_delivery_config).pack(side="left")
+            
+            row3 = ctk.CTkFrame(c)
+            row3.pack(fill="x", pady=5)
+            ctk.CTkLabel(row3, text="统一配置文件 (Excel):").pack(side="left")
+            ctk.CTkEntry(row3, textvariable=self.master_config_var, state="readonly").pack(side="left", expand=True, fill="x", padx=5)
+            ctk.CTkButton(row3, text=t("browse"), command=lambda: self._select_config_file(self.master_config_var, [("Excel files", "*.xlsx")])).pack(side="left")
+            
+            ctk.CTkButton(c, text=t("run_check"), command=self._run_enhanced_checklist).pack(pady=20)
+        
+        self.show_function_ui(t("checklist_title"), t("checklist_desc"), build)
+
+    def _select_checklist_folder(self):
+        """选择检查表文件夹"""
+        f = filedialog.askdirectory(title=t("select_folder"))
+        if f: self.checklist_folder_var.set(f)
+    
+    def _select_delivery_config(self):
+        """选择送货配置"""
+        f = filedialog.askopenfilename(
+            title="选择送货日期配置",
+            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
+        )
+        if f: 
+            self.delivery_config_var.set(f)
+
+    def _run_enhanced_checklist(self):
+        """运行增强版检查表"""
+        folder = self.checklist_folder_var.get()
+        if not folder:
+            messagebox.showwarning(t("warning"), t("folder_warning"))
+            return
+        
+        config_manager = None
+        if self.master_config_var.get():
+            config_manager = UnifiedConfigManager(self.master_config_var.get())
+            success, msg = config_manager.load_config(self.master_config_var.get())
+            if not success:
+                messagebox.showerror("配置错误", msg)
+                return
+        
+        delivery_config = self.delivery_config_var.get() or None
+        
+        p = ProgressPopup(self, t("check_results"))
+        self.progress_popup = p
+        
+        def logcb(m): p.log(m)
+        
+        threading.Thread(target=lambda: 
+            self._thread_task(
+                lambda: EnhancedOrderChecker(config_manager).run_checklist(folder, delivery_config, logcb),
+                show_message=False
+            )
+        ).start()
+
+    def show_automation_ui(self):
+        """显示自动化界面"""
+        def build(c):
+            self.folder_vars = {}
+            self.master_config_var = ctk.StringVar()
+            
+            for label, key in [(t("source_folder"),"source"),(t("supplier_folder"),"supplier"),(t("outlet_folder"),"outlet")]:
+                row = ctk.CTkFrame(c); row.pack(pady=5)
+                var = ctk.StringVar(); self.folder_vars[key] = var
+                ctk.CTkLabel(row, text=label).pack(side="left", padx=5)
+                ctk.CTkEntry(row, textvariable=var, state="readonly").pack(side="left", padx=5)
+                ctk.CTkButton(row, text=t("browse"), command=lambda k=key: self._select_folder(k)).pack(side="left", padx=5)
+            
+            row = ctk.CTkFrame(c); row.pack(pady=5)
+            ctk.CTkLabel(row, text="统一配置文件 (Excel):").pack(side="left", padx=5)
+            ctk.CTkEntry(row, textvariable=self.master_config_var, state="readonly").pack(side="left", expand=True, padx=5)
+            ctk.CTkButton(row, text=t("browse"), command=lambda: self._select_config_file(self.master_config_var, [("Excel files", "*.xlsx")])).pack(side="left", padx=5)
+            
+            ctk.CTkButton(c, text=t("start_automation"), command=self._run_enhanced_automation).pack(pady=20)
+        
+        self.show_function_ui(t("automation_title"), t("automation_desc"), build)
+
+    def _select_folder(self, key):
+        """选择文件夹"""
+        f = filedialog.askdirectory(title=t("select_folder"))
+        if f: self.folder_vars[key].set(f)
+    
+    def _select_config_file(self, var, filetypes=None):
+        """选择配置文件"""
+        f = filedialog.askopenfilename(
+            title="选择配置文件",
+            filetypes=filetypes or [("Excel文件", "*.xlsx"), ("所有文件", "*.*")]
+        )
+        if f: 
+            var.set(f)
+
+    def _run_enhanced_automation(self):
+        """运行增强版自动化"""
+        src, sup, out = self.folder_vars.get('source'), self.folder_vars.get('supplier'), self.folder_vars.get('outlet')
+        if not all([src.get(), sup.get(), out.get()]): 
+            messagebox.showwarning(t("warning"), t("folder_warning"))
+            return
+        
+        config_manager = None
+        if self.master_config_var.get():
+            config_manager = UnifiedConfigManager(self.master_config_var.get())
+            success, msg = config_manager.load_config(self.master_config_var.get())
+            if not success:
+                messagebox.showerror("配置错误", msg)
+                return
+        
+        p = ProgressPopup(self, t("processing_orders"))
+        self.progress_popup = p
+        self.email_dialogs = []
+        
+        def logcb(m): p.log(m)
+        def mapcb(m): 
+            mp = MappingPopup(self, t("outlet_suppliers")); mp.update_mapping(m)
+            self.mapping_popup = mp
+        
+        def emailcb(supplier_files):
+            self.after(0, lambda: self._prepare_email_sending(supplier_files, config_manager))
+        
+        automation = EnhancedOrderAutomation(config_manager)
+        
+        threading.Thread(target=lambda: self._thread_task(
+            lambda: automation.run_automation(
+                src.get(), sup.get(), out.get(), 
+                logcb, mapcb, emailcb)
+        )).start()
+    
+    def _prepare_email_sending(self, supplier_files, config_manager):
+        """准备发送邮件"""
+        if not supplier_files:
+            messagebox.showinfo("无文件可发送", "没有生成供应商文件")
+            return
+        
+        for file_info in supplier_files:
+            supplier_name = file_info["supplier"]
+            supplier_info = config_manager.get_supplier(supplier_name) if config_manager else None
+            
+            if not supplier_info or not supplier_info.get("email"):
+                self.progress_popup.log(f"⚠️ 跳过 {supplier_name} - 无邮箱配置")
+                continue
+            
+            body = f"Dear {supplier_name},\n\nPlease find attached the weekly order for your reference.\n\nBest regards,\nSushi Express Purchasing Team"
+            
+            mail_item = self.email_sender.send_email(
+                supplier_info["email"],
+                supplier_name,
+                body,
+                file_info["path"]
+            )
+            
+            if mail_item:
+                dialog = EmailConfirmationDialog(
+                    self,
+                    mail_item,
+                    supplier_name,
+                    "",
+                    file_info["path"],
+                    self._email_confirmation_callback
+                )
+                self.email_dialogs.append(dialog)
+            else:
+                self.progress_popup.log(f"❌ 创建 {supplier_name} 邮件失败")
+    
+    def _email_confirmation_callback(self, success, message):
+        """邮件发送确认回调"""
+        if success:
+            self.progress_popup.log(f"✅ {message}")
+        else:
+            self.progress_popup.log(f"❌ {message}")
+
+    def show_operation_supplies_ui(self):
+        """显示运营用品界面"""
+        def build(c):
+            self.master_file_var = ctk.StringVar(); self.output_folder_var = ctk.StringVar()
+            for label,var,fn in [("Select Master File", self.master_file_var, self._select_master_file),("Select Output Folder", self.output_folder_var, self._select_output_folder)]:
+                row = ctk.CTkFrame(c); row.pack(pady=5)
+                ctk.CTkLabel(row, text=label).pack(side="left", padx=5)
+                ctk.CTkEntry(row, textvariable=var, state="readonly").pack(side="left", padx=5)
+                ctk.CTkButton(row, text=t("browse"), command=fn).pack(side="left", padx=5)
+            ctk.CTkButton(c, text="Start Processing", command=self._run_operation_supplies).pack(pady=20)
+        self.show_function_ui("Operation Supplies", "", build)
+
+    def _select_master_file(self):
+        """选择主文件"""
+        f = filedialog.askopenfilename(title=t("select_folder"), filetypes=[("Excel","*.xlsx;*.xls")])
+        if f: self.master_file_var.set(f)
+
+    def _select_output_folder(self):
+        """选择输出文件夹"""
+        f = filedialog.askdirectory(title=t("select_folder"))
+        if f: self.output_folder_var.set(f)
+
+    def _run_operation_supplies(self):
+        """运行运营用品处理"""
+        mf, of = self.master_file_var.get(), self.output_folder_var.get()
+        if not mf or not of: messagebox.showwarning(t("warning"), t("folder_warning")); return
+        p = ProgressPopup(self, t("processing"))
+        self.progress_popup = p
+        def logcb(m): p.log(m)
+        threading.Thread(target=lambda: self._thread_task(lambda: OperationSuppliesOrder.process_order(mf, of, logcb))).start()
+
+    def _thread_task(self, fn, show_message=True):
+        """线程任务"""
+        try:
+            result = fn()
+            if show_message:
+                self.after(0, lambda: messagebox.showinfo(t("success"), result))
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror(t("error"), f"操作失败: {str(e)}"))
+
+# ========== Outlook下载器 ==========
 class OutlookDownloader:
-    """Outlook order downloader with enhanced UI"""
+    """Outlook订单下载器"""
+    
     OUTLET_MAP = {
         "century": "CSQ", "clementi": "TCM", "funan": "FN", "heartbeat": "HBB",
         "heartland": "HLM", "hillion": "HM", "hougang": "HGM", "imm": "IMM",
@@ -1058,7 +1605,7 @@ class OutlookDownloader:
     
     @classmethod
     def read_outlet_config(cls, config_file):
-        """读取分店配置文件"""
+        """读取分店配置"""
         outlets = []
         try:
             with open(config_file, mode='r', encoding='utf-8-sig') as f:
@@ -1077,7 +1624,7 @@ class OutlookDownloader:
 
     @classmethod
     def download_weekly_orders(cls, destination_folder, config_file=None, account_idx=None, callback=None):
-        """Download weekly orders with enhanced error handling"""
+        """下载周订单"""
         try:
             import win32com.client
             from win32com.client import Dispatch
@@ -1089,7 +1636,6 @@ class OutlookDownloader:
                 messagebox.showerror(t("error"), error_msg)
             return
 
-        # 读取分店配置
         email_to_outlet = {}
         if config_file:
             try:
@@ -1102,18 +1648,15 @@ class OutlookDownloader:
                     callback(f"❌ 分店配置读取失败: {str(e)}")
                 return
 
-        # 创建下载目录
         week_no = datetime.now().isocalendar()[1]
         save_path = os.path.join(destination_folder, f"Week_{week_no}")
         os.makedirs(save_path, exist_ok=True)
 
-        # 设置时间范围（上周六到这周日）
         today = datetime.now()
         monday_this_week = today - timedelta(days=today.weekday())
-        start_of_range = monday_this_week - timedelta(days=2)  # 上周六
+        start_of_range = monday_this_week - timedelta(days=2)
         end_of_range = monday_this_week + timedelta(days=6, hours=23, minutes=59)
 
-        # 初始化Outlook
         try:
             outlook = Dispatch("Outlook.Application").GetNamespace("MAPI")
         except Exception as e:
@@ -1122,7 +1665,6 @@ class OutlookDownloader:
                 callback(error_msg)
             return
 
-        # 如果没有提供账号索引，让用户选择
         if account_idx is None:
             accounts = [outlook.Folders.Item(i + 1) for i in range(outlook.Folders.Count)]
             account_names = [acct.Name for acct in accounts]
@@ -1168,22 +1710,20 @@ class OutlookDownloader:
 
     @classmethod
     def _collect_messages(cls, folder, start_date, end_date):
-        """收集指定日期范围内的邮件"""
+        """收集邮件"""
         messages = []
         try:
-            # 创建Outlook日期格式的过滤字符串
             filter_str = (
                 f"[ReceivedTime] >= '{start_date.strftime('%m/%d/%Y %I:%M %p')}' AND "
                 f"[ReceivedTime] <= '{end_date.strftime('%m/%d/%Y %I:%M %p')}'"
             )
             
             items = folder.Items.Restrict(filter_str)
-            items.Sort("[ReceivedTime]", True)  # 按接收时间降序排序
-            messages.extend([msg for msg in items if msg.Class == 43])  # 43是邮件类
+            items.Sort("[ReceivedTime]", True)
+            messages.extend([msg for msg in items if msg.Class == 43])
         except Exception as e:
             print(f"Error accessing folder {folder.Name}: {e}")
         
-        # 递归检查子文件夹
         for sub in folder.Folders:
             messages.extend(cls._collect_messages(sub, start_date, end_date))
         
@@ -1191,35 +1731,31 @@ class OutlookDownloader:
 
     @classmethod
     def _filter_latest_messages(cls, messages, email_to_outlet=None):
-        """过滤邮件，确保每个分店只保留最新的邮件"""
+        """过滤最新邮件"""
         latest_messages = {}
         
         for msg in messages:
             try:
                 sender_email = msg.SenderEmailAddress.lower()
                 
-                # 尝试匹配分店
                 outlet_key = sender_email
                 if email_to_outlet:
                     outlet_info = email_to_outlet.get(sender_email)
                     
-                    # 如果没有直接匹配，尝试从发件人名称中查找
                     if not outlet_info:
                         sender_name = msg.SenderName.lower()
                         for email, info in email_to_outlet.items():
                             if info['full_name'].lower() in sender_name:
                                 outlet_info = info
-                                outlet_key = info['short_name'].lower()  # 使用分店简称作为key
+                                outlet_key = info['short_name'].lower()
                                 break
                 
-                # 检查是否是Weekly Order邮件
                 subject = (msg.Subject or "").lower()
                 is_weekly = "weekly" in subject or "order" in subject
                 
                 if not is_weekly:
                     continue
                 
-                # 只保留每个分店最新的邮件
                 if outlet_key not in latest_messages or msg.ReceivedTime > latest_messages[outlet_key].ReceivedTime:
                     latest_messages[outlet_key] = msg
                     
@@ -1230,7 +1766,7 @@ class OutlookDownloader:
 
     @classmethod
     def _download_attachments(cls, messages, save_path, email_to_outlet=None, week_no=None):
-        """下载邮件附件，按分店重命名"""
+        """下载附件"""
         result = {
             "downloaded": 0,
             "skipped": 0,
@@ -1246,14 +1782,12 @@ class OutlookDownloader:
                 if attachments.Count == 0:
                     continue
                 
-                # 尝试匹配分店
                 outlet_info = None
                 prefix = "UNKNOWN"
                 
                 if email_to_outlet:
                     outlet_info = email_to_outlet.get(sender_email)
                     
-                    # 如果没有直接匹配，尝试从发件人名称中查找
                     if not outlet_info:
                         sender_name = msg.SenderName.lower()
                         for email, info in email_to_outlet.items():
@@ -1267,17 +1801,14 @@ class OutlookDownloader:
                 else:
                     result['unmatched_emails'].add(sender_email)
                 
-                # 下载所有附件（Weekly Order通常只有一个附件）
                 for att in attachments:
                     filename = att.FileName
                     
-                    # 构建新文件名
                     if week_no:
                         new_filename = f"{prefix}_weekly_order_week{week_no}_{filename}"
                     else:
                         new_filename = f"{prefix}_{filename}"
                     
-                    # 保存附件
                     full_path = os.path.join(save_path, new_filename)
                     att.SaveAsFile(full_path)
                     result['downloaded'] += 1
@@ -1288,68 +1819,58 @@ class OutlookDownloader:
         
         return result
 
-# ========== Operation Supplies Monthly Order Core ==========
+# ========== 运营用品订单 ==========
 class OperationSuppliesOrder:
-    """Operation Supplies Monthly Order Automation with MOQ calculation and amount display"""
+    """运营用品订单处理"""
+    
     @staticmethod
     def get_monthly_order_data(master_file):
-        """Extract outlet data and order quantities from master file"""
+        """获取月度订单数据"""
         try:
             wb = load_workbook(master_file, data_only=True)
             data_sheet = wb["Data"]
             
-            # Extract outlet data
             outlets = []
             for row in data_sheet.iter_rows(min_row=2, max_col=7, values_only=True):
-                if row[1] and row[2]:  # Ensure outlet and short name exist
+                if row[1] and row[2]:
                     outlets.append({
-                        "brand": row[1],          # Column B - Brands
-                        "outlet": row[2],         # Column C - Outlet (B2 value)
-                        "short_name": row[3],     # Column D - Short Name (Sheet Name)
-                        "full_name": row[4],      # Column E - Outlet Full Name (for F5)
-                        "address": row[5],        # Column F - Address (for F6)
-                        "delivery_day": row[6]    # Column G - Delivery Day
+                        "brand": row[1],
+                        "outlet": row[2],
+                        "short_name": row[3],
+                        "full_name": row[4],
+                        "address": row[5],
+                        "delivery_day": row[6]
                     })
             
-            # Extract order quantities and unit prices
             orders = defaultdict(dict)
             unit_prices = defaultdict(dict)
             
-            # Get unit prices from supplier templates
             for supplier in ["Freshening", "Legacy", "Unikleen"]:
                 if supplier in wb.sheetnames:
                     ws = wb[supplier]
                     
-                    # Unit prices are in column D
                     if supplier == "Freshening":
-                        # D12:D45 for 34 items
                         unit_prices[supplier] = [ws[f'D{i}'].value for i in range(12, 46)]
                     elif supplier == "Legacy":
-                        # D12:D14 for 3 items
                         unit_prices[supplier] = [ws[f'D{i}'].value for i in range(12, 15)]
-                    else:  # Unikleen
-                        # D12:D29 for 18 items
+                    else:
                         unit_prices[supplier] = [ws[f'D{i}'].value for i in range(12, 30)]
             
-            # Extract orders from outlet sheets
             for outlet in outlets:
                 sheet_name = outlet["short_name"]
                 if sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
                     
-                    # Freshening orders (L4:L37)
                     freshening = []
                     for row in range(4, 38):
                         cell_value = ws[f'L{row}'].value
                         freshening.append(cell_value if cell_value is not None else 0)
                     
-                    # Legacy orders (L41:L43)
                     legacy = []
                     for row in range(41, 44):
                         cell_value = ws[f'L{row}'].value
                         legacy.append(cell_value if cell_value is not None else 0)
                     
-                    # Unikleen orders (L47:L64)
                     unikleen = []
                     for row in range(47, 65):
                         cell_value = ws[f'L{row}'].value
@@ -1361,7 +1882,6 @@ class OperationSuppliesOrder:
                         "unikleen": unikleen
                     }
             
-            # Get supplier templates
             templates = {}
             for supplier in ["Freshening", "Legacy", "Unikleen"]:
                 if supplier in wb.sheetnames:
@@ -1373,7 +1893,7 @@ class OperationSuppliesOrder:
 
     @classmethod
     def calculate_order_amounts(cls, orders, unit_prices):
-        """Calculate order amounts for each outlet and supplier"""
+        """计算订单金额"""
         amounts = defaultdict(dict)
         
         for outlet, order_data in orders.items():
@@ -1381,11 +1901,9 @@ class OperationSuppliesOrder:
                 items = order_data.get(supplier, [])
                 prices = unit_prices.get(supplier.capitalize(), [])
                 
-                # Ensure we have prices for all items
                 if len(prices) < len(items):
                     prices = prices + [0] * (len(items) - len(prices))
                 
-                # Calculate total amount
                 total = sum(qty * price for qty, price in zip(items, prices) if price is not None)
                 amounts[outlet][supplier] = total
         
@@ -1393,17 +1911,15 @@ class OperationSuppliesOrder:
 
     @classmethod
     def check_moq(cls, outlets, orders, unit_prices, log_callback=None):
-        """Check MOQ requirements for each outlet and display order amounts"""
+        """检查MOQ"""
         results = {
             "freshening": defaultdict(list),
             "legacy": defaultdict(list),
             "unikleen": defaultdict(list)
         }
         
-        # Calculate order amounts
         amounts = cls.calculate_order_amounts(orders, unit_prices)
         
-        # Freshening MOQ check
         for outlet in outlets:
             short_name = outlet["short_name"]
             brand_type = outlet["brand"]
@@ -1418,20 +1934,18 @@ class OperationSuppliesOrder:
             elif amount > 0:
                 results["freshening"]["above_moq"].append(f"{short_name} (${amount:.2f})")
         
-        # Legacy MOQ check
         for outlet in outlets:
             short_name = outlet["short_name"]
             quantities = orders.get(short_name, {}).get("legacy", [])
             
             total = sum(q for q in quantities if isinstance(q, (int, float)))
-            cartons = total  # Assuming 1 carton per item
+            cartons = total
             
             if cartons < 2 and total > 0:
                 results["legacy"]["below_moq"].append(f"{short_name} ({cartons} ctn < 2 ctn)")
             elif total > 0:
                 results["legacy"]["above_moq"].append(f"{short_name} ({cartons} ctn)")
         
-        # Unikleen MOQ check
         for outlet in outlets:
             short_name = outlet["short_name"]
             amount = amounts.get(short_name, {}).get("unikleen", 0)
@@ -1441,7 +1955,6 @@ class OperationSuppliesOrder:
             elif amount > 0:
                 results["unikleen"]["above_moq"].append(f"{short_name} (${amount:.2f})")
         
-        # Generate summary with amounts
         summary = "=== MOQ 檢查結果 (顯示訂購金額) ===\n"
         
         for supplier in ["freshening", "legacy", "unikleen"]:
@@ -1465,20 +1978,17 @@ class OperationSuppliesOrder:
 
     @classmethod
     def generate_supplier_files(cls, master_file, output_folder, outlets, orders, templates, amounts, log_callback=None):
-        """Generate order files for each supplier using templates and display order amounts"""
+        """生成供应商文件"""
         try:
             now = datetime.now()
             next_month = now.month + 1 if now.month < 12 else 1
             year = now.year if now.month < 12 else now.year + 1
             supplier_files = []
             
-            # Create supplier files
             for supplier, template_ws in templates.items():
-                # Create new workbook
                 wb = Workbook()
-                wb.remove(wb.active)  # Remove default sheet
+                wb.remove(wb.active)
                 
-                # Add outlets that have orders for this supplier
                 outlet_count = 0
                 for outlet in outlets:
                     short_name = outlet["short_name"]
@@ -1487,24 +1997,19 @@ class OperationSuppliesOrder:
                     if not outlet_orders:
                         continue
                     
-                    # Get orders for this supplier
                     supplier_key = supplier.lower()
                     if supplier_key == "freshening":
                         order_items = outlet_orders.get("freshening", [])
                     elif supplier_key == "legacy":
                         order_items = outlet_orders.get("legacy", [])
-                    else:  # Unikleen
+                    else:
                         order_items = outlet_orders.get("unikleen", [])
                     
-                    # Get order amount
                     order_amount = amounts.get(short_name, {}).get(supplier_key, 0)
                     
-                    # Only create sheet if there are orders
                     if any(qty > 0 for qty in order_items):
-                        # Create new sheet for this outlet from template
                         new_ws = wb.create_sheet(title=short_name)
                         
-                        # Copy template to new sheet
                         for row in template_ws.iter_rows():
                             for cell in row:
                                 new_cell = new_ws.cell(
@@ -1513,7 +2018,6 @@ class OperationSuppliesOrder:
                                     value=cell.value
                                 )
                                 
-                                # Copy styles
                                 if cell.has_style:
                                     new_cell.font = copy.copy(cell.font)
                                     new_cell.border = copy.copy(cell.border)
@@ -1522,58 +2026,45 @@ class OperationSuppliesOrder:
                                     new_cell.protection = copy.copy(cell.protection)
                                     new_cell.alignment = copy.copy(cell.alignment)
                         
-                        # Copy column widths
                         for col_idx in range(1, template_ws.max_column + 1):
                             col_letter = get_column_letter(col_idx)
                             new_ws.column_dimensions[col_letter].width = template_ws.column_dimensions[col_letter].width
                         
-                        # Copy row heights
                         for row_idx in range(1, template_ws.max_row + 1):
                             new_ws.row_dimensions[row_idx].height = template_ws.row_dimensions[row_idx].height
                         
-                        # Copy merged cells
                         for merged_range in template_ws.merged_cells.ranges:
                             new_ws.merge_cells(str(merged_range))
                         
-                        # Set outlet-specific values
-                        new_ws['F5'] = outlet["full_name"]  # Outlet Full Name
-                        new_ws['F6'] = outlet["address"]    # Address
+                        new_ws['F5'] = outlet["full_name"]
+                        new_ws['F6'] = outlet["address"]
                         
-                        # Add delivery day for Freshening
                         if supplier == "Freshening":
-                            new_ws['G5'] = outlet["delivery_day"]  # Delivery day
+                            new_ws['G5'] = outlet["delivery_day"]
                         
-                        # Add orders based on supplier type
                         if supplier == "Freshening":
-                            # Freshening: L4:L37 (34 items)
                             for i, qty in enumerate(order_items[:34]):
                                 new_ws[f'L{i+4}'] = qty
                             
-                            # Display order amount in F46
                             new_ws['F46'] = order_amount
                             new_ws['F46'].number_format = '"$"#,##0.00'
                             
                         elif supplier == "Legacy":
-                            # Legacy: L41:L43 (3 items)
                             for i, qty in enumerate(order_items[:3]):
                                 new_ws[f'L{i+41}'] = qty
                             
-                            # Display carton count in F16
                             cartons = sum(order_items[:3])
                             new_ws['F16'] = cartons
                             
-                        else:  # Unikleen
-                            # Unikleen: L47:L64 (18 items)
+                        else:
                             for i, qty in enumerate(order_items[:18]):
                                 new_ws[f'L{i+47}'] = qty
                             
-                            # Display order amount in F31
                             new_ws['F31'] = order_amount
                             new_ws['F31'].number_format = '"$"#,##0.00'
                         
                         outlet_count += 1
                 
-                # Save file only if it has sheets
                 if outlet_count > 0:
                     file_name = f"{supplier}_Order_{year}_{next_month:02d}.xlsx"
                     file_path = os.path.join(output_folder, file_name)
@@ -1592,9 +2083,8 @@ class OperationSuppliesOrder:
 
     @classmethod
     def process_order(cls, master_file, output_folder, log_callback=None, progress_callback=None):
-        """Main processing function for operation supplies with MOQ and amounts"""
+        """处理订单"""
         try:
-            # Step 1: Read data from master file
             if log_callback:
                 log_callback(f"讀取主文件: {os.path.basename(master_file)}")
             outlets, orders, templates, unit_prices = cls.get_monthly_order_data(master_file)
@@ -1602,12 +2092,10 @@ class OperationSuppliesOrder:
             if not outlets:
                 return False, "無法讀取分店數據，請檢查Data工作表"
             
-            # Step 2: Calculate order amounts and check MOQ requirements
             if log_callback:
                 log_callback("\n計算訂購金額並檢查MOQ要求...")
             moq_results, moq_summary, amounts = cls.check_moq(outlets, orders, unit_prices, log_callback)
             
-            # Step 3: Generate supplier files with amounts displayed
             if log_callback:
                 log_callback("\n生成供應商訂單文件並顯示訂購金額...")
             success, supplier_files = cls.generate_supplier_files(
@@ -1617,7 +2105,6 @@ class OperationSuppliesOrder:
             if not success:
                 return False, supplier_files
             
-            # Step 4: Create result summary
             result = (
                 f"=== 營運用品月訂單處理完成 ===\n\n"
                 f"📊 MOQ 檢查結果:\n{moq_summary}\n\n"
@@ -1629,296 +2116,7 @@ class OperationSuppliesOrder:
         except Exception as e:
             return False, f"處理過程中出錯: {str(e)}\n{traceback.format_exc()}"
 
-
-class SushiExpressApp(ctk.CTk):
-    def __init__(self):
-        super().__init__()
-        self.title(f"Sushi Express Automation Tool v{VERSION}")
-        self.geometry("1200x900")
-        self.minsize(1000,800)
-        self.configure(fg_color=DARK_BG)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        # Placeholders
-        self.download_folder_var = None
-        self.checklist_folder_var = None
-        self.folder_vars = {}
-        self.master_file_var = None
-        self.output_folder_var = None
-        self.progress_popup = None
-        self.mapping_popup = None
-        self.outlet_config_var = None
-        self.delivery_config_var = None
-
-        self._setup_ui()
-        self.show_login()
-
-    def _setup_ui(self):
-        # Header and content layout
-        self.main_container = ctk.CTkFrame(self, fg_color="transparent")
-        self.main_container.pack(fill="both", expand=True, padx=20, pady=20)
-
-        # Header
-        self.header_frame = ctk.CTkFrame(self.main_container, fg_color=DARK_PANEL, corner_radius=24, height=150)
-        self.header_frame.pack(fill="x", padx=10, pady=10)
-        # Center logo
-        self.logo_img = load_image(LOGO_PATH)
-        if self.logo_img:
-            ctk.CTkLabel(self.header_frame, image=self.logo_img, text="").pack(expand=True)
-        # Title labels
-        self.title_label = ctk.CTkLabel(self.header_frame, text="", font=FONT_TITLE, text_color=ACCENT_BLUE)
-        self.subtitle_label = ctk.CTkLabel(self.header_frame, text="", font=FONT_SUB, text_color=TEXT_COLOR)
-        self.title_label.pack()
-        self.subtitle_label.pack()
-
-        # Buttons frame
-        self.buttons_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
-        self.buttons_frame.pack(fill="x", padx=10, pady=10)
-
-        # Content frame
-        self.content_frame = ctk.CTkFrame(self.main_container, fg_color=DARK_PANEL, corner_radius=24)
-        self.content_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        self.content_frame.pack_propagate(False)
-
-    def _on_close(self):
-        if messagebox.askyesno(t("exit_system"), t("exit_confirm")):
-            self.destroy()
-
-    def show_login(self):
-        for w in self.content_frame.winfo_children(): w.destroy()
-        self.login_frame = ctk.CTkFrame(self.content_frame, fg_color=DARK_PANEL, corner_radius=24, width=450, height=400)
-        self.login_frame.place(relx=0.5, rely=0.5, anchor="center")
-        self.pwd_entry = ctk.CTkEntry(self.login_frame, show="*", font=FONT_SUB, width=300, placeholder_text=t("password"), fg_color=ENTRY_BG, height=45)
-        self.pwd_entry.pack(pady=(20,10))
-        self.pwd_entry.bind("<Return>", lambda e: self._try_login())
-        ctk.CTkButton(self.login_frame, text=t("login_btn"), command=self._try_login, width=200).pack(pady=(0,20))
-        ctk.CTkLabel(self.login_frame, text=f"Version {VERSION} | {DEVELOPER}", font=("Consolas",12), text_color="#64748B").pack(side="bottom", pady=10)
-
-    def _try_login(self):
-        if self.pwd_entry.get() == PASSWORD:
-            self.login_frame.destroy()
-            self.show_main_menu()
-        else:
-            messagebox.showerror(t("error"), t("incorrect_pw"))
-
-    def show_main_menu(self):
-        for w in self.content_frame.winfo_children(): w.destroy()
-        self.title_label.configure(text=t("main_title"))
-        self.subtitle_label.configure(text=t("select_function"))
-        # Clear old buttons
-        for w in self.buttons_frame.winfo_children(): w.destroy()
-        # Create buttons
-        funcs = [ (t("download_title"), self.show_download_ui),
-                  (t("checklist_title"), self.show_checklist_ui),
-                  (t("automation_title"), self.show_automation_ui),
-                  ("營運用品月訂單", self.show_operation_supplies_ui),
-                  (t("exit_system"), self._on_close) ]
-        for text, cmd in funcs:
-            btn = ctk.CTkButton(self.buttons_frame, text=text, command=cmd)
-            btn.pack(side="left", padx=10, pady=10, expand=True)
-
-    def show_function_ui(self, title, subtitle, content_callback):
-        for w in self.content_frame.winfo_children(): w.destroy()
-        self.title_label.configure(text=title)
-        self.subtitle_label.configure(text=subtitle)
-        content = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=20, pady=20)
-        content_callback(content)
-        ctk.CTkButton(self.content_frame, text=t("back_to_menu"), command=self.show_main_menu).pack(pady=10)
-
-    def show_download_ui(self):
-        def build(c):
-            self.download_folder_var = ctk.StringVar()
-            self.config_file_var = ctk.StringVar()  # 新增配置文件变量
-            
-            # 原有文件夹选择
-            row1 = ctk.CTkFrame(c)
-            row1.pack(fill="x", pady=5)
-            ctk.CTkLabel(row1, text="下载文件夹:").pack(side="left")
-            ctk.CTkEntry(row1, textvariable=self.download_folder_var, state="readonly").pack(side="left", expand=True, fill="x", padx=5)
-            ctk.CTkButton(row1, text=t("browse"), command=self._select_download_folder).pack(side="left")
-            
-            # 新增配置文件选择
-            row2 = ctk.CTkFrame(c)
-            row2.pack(fill="x", pady=5)
-            ctk.CTkLabel(row2, text="分店配置文件 (可选):").pack(side="left")
-            ctk.CTkEntry(row2, textvariable=self.config_file_var, state="readonly").pack(side="left", expand=True, fill="x", padx=5)
-            ctk.CTkButton(row2, text=t("browse"), command=self._select_config_file).pack(side="left")
-            
-            ctk.CTkButton(c, text=t("start_download"), command=self._run_download).pack(pady=20)
-        
-        self.show_function_ui(t("download_title"), t("download_desc"), build)
-
-    def _select_download_folder(self):
-        f = filedialog.askdirectory(title=t("select_folder"))
-        if f: self.download_folder_var.set(f)
-    
-    def _select_config_file(self):
-        f = filedialog.askopenfilename(
-            title="选择分店配置文件",
-            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
-        )
-        if f: 
-            self.config_file_var.set(f)
-
-    def _run_download(self):
-        folder = self.download_folder_var.get()
-        if not folder:
-            messagebox.showwarning(t("warning"), t("folder_warning"))
-            return
-        
-        config_file = self.config_file_var.get() or None
-        OutlookDownloader.download_weekly_orders(
-            folder, 
-            config_file=config_file,
-            callback=lambda msg: messagebox.showinfo(t("download_summary"), msg)
-        )
-
-    def show_checklist_ui(self):
-        def build(c):
-            self.checklist_folder_var = ctk.StringVar()
-            self.delivery_config_var = ctk.StringVar()  # 新增供应商配置
-            
-            # 原有文件夹选择
-            row1 = ctk.CTkFrame(c)
-            row1.pack(fill="x", pady=5)
-            ctk.CTkLabel(row1, text="订单文件夹:").pack(side="left")
-            ctk.CTkEntry(row1, textvariable=self.checklist_folder_var, state="readonly").pack(side="left", expand=True, fill="x", padx=5)
-            ctk.CTkButton(row1, text=t("browse"), command=self._select_checklist_folder).pack(side="left")
-            
-            # 新增供应商配置选择
-            row2 = ctk.CTkFrame(c)
-            row2.pack(fill="x", pady=5)
-            ctk.CTkLabel(row2, text="送货日期配置 (可选):").pack(side="left")
-            ctk.CTkEntry(row2, textvariable=self.delivery_config_var, state="readonly").pack(side="left", expand=True, fill="x", padx=5)
-            ctk.CTkButton(row2, text=t("browse"), command=self._select_delivery_config).pack(side="left")
-            
-            ctk.CTkButton(c, text=t("run_check"), command=self._run_checklist).pack(pady=20)
-
-    def _select_checklist_folder(self):
-        f = filedialog.askdirectory(title=t("select_folder"))
-        if f: self.checklist_folder_var.set(f)
-    
-    def _select_delivery_config(self):
-        f = filedialog.askopenfilename(
-            title="选择送货日期配置",
-            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
-        )
-        if f: 
-            self.delivery_config_var.set(f)
-
-    def _run_checklist(self):
-        folder = self.checklist_folder_var.get()
-        if not folder:
-            messagebox.showwarning(t("warning"), t("folder_warning"))
-            return
-        
-        config_file = self.delivery_config_var.get() or None
-        result = OrderChecker.run_checklist(folder, config_file)
-        ScrollableMessageBox(self, t("check_results"), result)
-
-    def show_automation_ui(self):
-        def build(c):
-            self.folder_vars = {}
-            self.outlet_config_var = ctk.StringVar()
-            self.delivery_config_var = ctk.StringVar()
-            
-            # 原有文件夹选择
-            for label, key in [(t("source_folder"),"source"),(t("supplier_folder"),"supplier"),(t("outlet_folder"),"outlet")]:
-                row = ctk.CTkFrame(c); row.pack(pady=5)
-                var = ctk.StringVar(); self.folder_vars[key] = var
-                ctk.CTkLabel(row, text=label).pack(side="left", padx=5)
-                ctk.CTkEntry(row, textvariable=var, state="readonly").pack(side="left", padx=5)
-                ctk.CTkButton(row, text=t("browse"), command=lambda k=key: self._select_folder(k)).pack(side="left", padx=5)
-            
-            # 新增分店配置选择
-            row = ctk.CTkFrame(c); row.pack(pady=5)
-            ctk.CTkLabel(row, text="分店配置文件 (可选):").pack(side="left", padx=5)
-            ctk.CTkEntry(row, textvariable=self.outlet_config_var, state="readonly").pack(side="left", expand=True, padx=5)
-            ctk.CTkButton(row, text=t("browse"), command=lambda: self._select_config(self.outlet_config_var)).pack(side="left", padx=5)
-            
-            # 新增送货日期配置选择
-            row = ctk.CTkFrame(c); row.pack(pady=5)
-            ctk.CTkLabel(row, text="送货日期配置 (可选):").pack(side="left", padx=5)
-            ctk.CTkEntry(row, textvariable=self.delivery_config_var, state="readonly").pack(side="left", expand=True, padx=5)
-            ctk.CTkButton(row, text=t("browse"), command=lambda: self._select_config(self.delivery_config_var)).pack(side="left", padx=5)
-            
-            ctk.CTkButton(c, text=t("start_automation"), command=self._run_automation).pack(pady=20)
-
-    def _select_folder(self, key):
-        f = filedialog.askdirectory(title=t("select_folder"))
-        if f: self.folder_vars[key].set(f)
-    
-    def _select_config(self, var):
-        f = filedialog.askopenfilename(
-            title="选择配置文件",
-            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
-        )
-        if f: 
-            var.set(f)
-
-    def _run_automation(self):
-        src, sup, out = self.folder_vars.get('source'), self.folder_vars.get('supplier'), self.folder_vars.get('outlet')
-        if not all([src.get(), sup.get(), out.get()]): 
-            messagebox.showwarning(t("warning"), t("folder_warning"))
-            return
-        
-        # 读取配置
-        outlet_config = None
-        if self.outlet_config_var.get():
-            try:
-                outlet_config = OutlookDownloader.read_outlet_config(self.outlet_config_var.get())
-            except Exception as e:
-                messagebox.showerror("错误", f"无法读取分店配置: {str(e)}")
-                return
-        
-        delivery_config = self.delivery_config_var.get() or None
-        
-        p = ProgressPopup(self, t("processing_orders"))
-        self.progress_popup = p
-        def logcb(m): p.log(m)
-        def mapcb(m): 
-            mp = MappingPopup(self, t("outlet_suppliers")); mp.update_mapping(m)
-            self.mapping_popup = mp
-        
-        threading.Thread(target=lambda: self._thread_task(
-            lambda: OrderAutomation.run_automation(
-                src.get(), sup.get(), out.get(), 
-                outlet_config, delivery_config, logcb, mapcb)
-        )).start()
-
-    def show_operation_supplies_ui(self):
-        def build(c):
-            self.master_file_var = ctk.StringVar(); self.output_folder_var = ctk.StringVar()
-            for label,var,fn in [("Select Master File", self.master_file_var, self._select_master_file),("Select Output Folder", self.output_folder_var, self._select_output_folder)]:
-                row = ctk.CTkFrame(c); row.pack(pady=5)
-                ctk.CTkLabel(row, text=label).pack(side="left", padx=5)
-                ctk.CTkEntry(row, textvariable=var, state="readonly").pack(side="left", padx=5)
-                ctk.CTkButton(row, text=t("browse"), command=fn).pack(side="left", padx=5)
-            ctk.CTkButton(c, text="Start Processing", command=self._run_operation_supplies).pack(pady=20)
-        self.show_function_ui("Operation Supplies", "", build)
-
-    def _select_master_file(self):
-        f = filedialog.askopenfilename(title=t("select_folder"), filetypes=[("Excel","*.xlsx;*.xls")])
-        if f: self.master_file_var.set(f)
-
-    def _select_output_folder(self):
-        f = filedialog.askdirectory(title=t("select_folder"))
-        if f: self.output_folder_var.set(f)
-
-    def _run_operation_supplies(self):
-        mf, of = self.master_file_var.get(), self.output_folder_var.get()
-        if not mf or not of: messagebox.showwarning(t("warning"), t("folder_warning")); return
-        p = ProgressPopup(self, t("processing"))
-        self.progress_popup = p
-        def logcb(m): p.log(m)
-        threading.Thread(target=lambda: self._thread_task(lambda: OperationSuppliesOrder.process_order(mf, of, logcb))).start()
-
-    def _thread_task(self, fn):
-        success, msg = fn()
-        self.after(0, lambda: messagebox.showinfo(t("success") if success else t("warning"), msg))
-
-# Entry point
+# ========== 入口点 ==========
 if __name__ == '__main__':
     try:
         app = SushiExpressApp()
@@ -1926,4 +2124,3 @@ if __name__ == '__main__':
     except Exception as e:
         messagebox.showerror("Error", f"Startup failed: {e}")
         sys.exit(1)
-l
