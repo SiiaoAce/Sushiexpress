@@ -1405,7 +1405,7 @@ class DataRepository(QtCore.QObject):
                 return cached
 
         self.log_message.emit(
-            f"[FILTER] Loading options for brands {selected_brands or '(all)'} with state: {state}"
+            f"[FILTER] Loading filter options for {len(selected_brands) if selected_brands else 'all'} brands"
         )
 
         brand_options = list(dict.fromkeys([*state.brands, *DATABASES])) if state.brands else list(DATABASES)
@@ -1420,7 +1420,7 @@ class DataRepository(QtCore.QObject):
             "brands": brand_options,
         }
 
-        targets: List[str] = list(DATABASES)
+        targets: List[str] = selected_brands[:] if selected_brands else list(DATABASES)
         if not targets:
             return options
 
@@ -1628,10 +1628,7 @@ class DataRepository(QtCore.QObject):
             and not state.payments
             and not state.discounts
         ):
-            cached_options = {key: list(values) for key, values in options.items()}
-            self._filter_cache[cache_key] = cached_options
-            if cache_key:
-                self._filter_cache.setdefault((), {key: list(values) for key, values in options.items()})
+            self._filter_cache[cache_key] = options
             cache_counts = {key: len(val) for key, val in options.items()}
             self.log_message.emit(
                 f"[FILTER] Cache populated for brands {cache_key or '(all)'}: counts={cache_counts}"
@@ -1853,11 +1850,22 @@ class DataRepository(QtCore.QObject):
         payment_frame: pd.DataFrame,
         state: FilterState,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        print(f"[DEBUG] Initial row count: {len(detail_frame)}")
         if detail_frame.empty:
+            print("[DEBUG] Empty detail frame received")
             return detail_frame.copy(), payment_frame.head(0).copy()
 
         detail = detail_frame.copy()
         detail["_date"] = pd.to_datetime(detail["c_date"], errors="coerce")
+        
+        # Debug: Print date range in data
+        if not detail.empty and '_date' in detail.columns:
+            min_date = detail['_date'].min()
+            max_date = detail['_date'].max()
+            print(f"[DEBUG] Date range in data: {min_date} to {max_date}")
+        
+        if state.date_from or state.date_to:
+            print(f"[DEBUG] Filtering by date range: {state.date_from} to {state.date_to}")
 
         if state.date_from is not None:
             detail = detail[detail["_date"].dt.date >= state.date_from]
@@ -1867,14 +1875,23 @@ class DataRepository(QtCore.QObject):
         if state.outlets:
             detail = detail[detail["store_name"].isin(state.outlets)]
 
-        if state.products:
-            detail = detail[detail["item_name"].isin(state.products)]
+        if state.products and 'product_name' in detail.columns:
+            detail = detail[detail["product_name"].isin(state.products)]
+            if detail.empty:
+                print("[DEBUG] No matching products found after product filter")
+                return detail.drop(columns=["_date"], errors="ignore"), payment_frame.head(0).copy()
 
-        if state.categories:
-            detail = detail[detail["category_code"].isin(state.categories)]
+        if state.categories and 'category_name' in detail.columns:
+            detail = detail[detail["category_name"].isin(state.categories)]
+            if detail.empty:
+                print("[DEBUG] No matching categories found after category filter")
+                return detail.drop(columns=["_date"], errors="ignore"), payment_frame.head(0).copy()
 
-        if state.discounts:
-            detail = detail[detail["disc_name"].isin(state.discounts)]
+        if state.discounts and 'discount_name' in detail.columns:
+            detail = detail[detail["discount_name"].isin(state.discounts)]
+            if detail.empty:
+                print("[DEBUG] No matching discounts found after discount filter")
+                return detail.drop(columns=["_date"], errors="ignore"), payment_frame.head(0).copy()
 
         if state.months:
             month_key = detail["_date"].dt.to_period("M").astype(str)
@@ -1889,39 +1906,48 @@ class DataRepository(QtCore.QObject):
             detail = detail[weekday_series.isin(set(state.weekdays))]
 
         if detail.empty:
-            return detail.drop(columns=["_date"]), payment_frame.head(0).copy()
+            return detail.drop(columns=["_date"], how="ignore"), payment_frame.head(0).copy()
 
+        # Get unique transaction keys from detail data
         detail_keys = detail[["c_date", "store_name", "sales_no"]].drop_duplicates()
-        payment = payment_frame.merge(detail_keys, on=["c_date", "store_name", "sales_no"], how="inner")
-
-        if state.payments:
-            selected_payments = {
-                value.strip().casefold()
-                for value in state.payments
-                if isinstance(value, str) and value.strip()
-            }
-            if not selected_payments:
-                detail = detail.iloc[0:0]
-                payment = payment.iloc[0:0]
-                detail.drop(columns=["_date"], inplace=True, errors="ignore")
-                return detail.reset_index(drop=True), payment.reset_index(drop=True)
-
-            payment_name_series = payment.get("payment_name")
-            normalized_payment_names = (
-                payment_name_series.astype(str).str.strip().str.casefold()
-                if payment_name_series is not None
-                else pd.Series([], dtype="object")
-            )
-            payment = payment[normalized_payment_names.isin(selected_payments)]
-            if payment.empty:
-                detail = detail.iloc[0:0]
-            else:
-                allowed_keys = payment[["c_date", "store_name", "sales_no"]].drop_duplicates()
-                detail = detail.merge(allowed_keys, on=["c_date", "store_name", "sales_no"], how="inner")
-
-        detail.drop(columns=["_date"], inplace=True)
-
-        return detail.reset_index(drop=True), payment.reset_index(drop=True)
+        
+        # If no payment filter is applied, return all details and matching payments
+        if not state.payments:
+            print("[DEBUG] No payment filter applied, returning all detail rows")
+            payment = payment_frame.merge(detail_keys, on=["c_date", "store_name", "sales_no"], how="inner")
+            detail.drop(columns=["_date"], inplace=True, errors="ignore")
+            return detail.reset_index(drop=True), payment.reset_index(drop=True)
+            
+        # Apply payment filter if specific payments are selected
+        print(f"[DEBUG] Applying payment filter for: {state.payments}")
+        
+        # First, get all payments that match the filter
+        filtered_payments = payment_frame[payment_frame["payment_name"].isin(state.payments)]
+        print(f"[DEBUG] Found {len(filtered_payments)} payment rows matching the filter")
+        
+        if filtered_payments.empty:
+            print("[DEBUG] No payments match the filter, returning empty result")
+            return pd.DataFrame(columns=detail.columns), pd.DataFrame(columns=payment_frame.columns)
+            
+        # Get unique transactions that have matching payments
+        matching_transactions = filtered_payments[["c_date", "store_name", "sales_no"]].drop_duplicates()
+        print(f"[DEBUG] Found {len(matching_transactions)} unique transactions with matching payments")
+        
+        # Filter details to only include transactions with matching payments
+        filtered_detail = detail.merge(matching_transactions, on=["c_date", "store_name", "sales_no"], how="inner")
+        print(f"[DEBUG] Detail rows after payment filter: {len(filtered_detail)}")
+        
+        # Get all payments for the filtered transactions
+        payment = payment_frame.merge(
+            filtered_detail[["c_date", "store_name", "sales_no"]].drop_duplicates(),
+            on=["c_date", "store_name", "sales_no"],
+            how="inner"
+        )
+        
+        filtered_detail.drop(columns=["_date"], inplace=True, errors="ignore")
+        print(f"[DEBUG] Final result - Detail rows: {len(filtered_detail)}, Payment rows: {len(payment)}")
+        
+        return filtered_detail.reset_index(drop=True), payment.reset_index(drop=True)
 
     def fetch_sales_transactions(self, state: FilterState) -> SalesReportFrames:
         targets: List[str] = []
@@ -3237,8 +3263,6 @@ class MultiSelectFilter(QtWidgets.QWidget):
         if self._all_entry in options_list:
             options_list.remove(self._all_entry)
         previous = set(self._selected) if maintain else set()
-        prior_total = len(self._option_items)
-        was_all_selected = bool(maintain and previous and prior_total and len(previous) == prior_total)
 
         self._suppress_emit = True
         self._list_widget.blockSignals(True)
@@ -3269,10 +3293,7 @@ class MultiSelectFilter(QtWidgets.QWidget):
         self._suppress_emit = False
 
         if maintain and previous:
-            if was_all_selected:
-                self.set_selections(options_list)
-            else:
-                self.set_selections([value for value in previous if value in options_list])
+            self.set_selections([value for value in previous if value in options_list])
         else:
             self.set_selections(options_list)
 
@@ -5928,13 +5949,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._refresh_sales_transactions(state)
                 return
 
-        options_state = FilterState(
-            date_from=state.date_from,
-            date_to=state.date_to,
-            brands=list(state.brands),
-        )
-
-        cached_options = self.repository.get_cached_filter_options(options_state)
+        cached_options = self.repository.get_cached_filter_options(state)
         if cached_options is not None:
             self._log("[FILTER] Using cached filter options for requested brands.")
             self.filter_panel.populate(cached_options, emit=False)
@@ -5946,45 +5961,52 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._pending_state_for_data = state
         self.filter_panel.setEnabled(False)
-        self.repository.load_filter_options_async(options_state)
+        self.repository.load_filter_options_async(state)
 
     def _log(self, message: str) -> None:
         self.log_console.append_log(message)
 
     @QtCore.pyqtSlot(FilterState, dict)
     def _on_filters_loaded(self, state: FilterState, options: Dict[str, List[str]]) -> None:
-        if (
-            self._activity_options_refresh_pending
-            and self._activity_request_state is not None
-            and state == self._activity_request_state
-        ):
-            self._activity_options_refresh_pending = False
-            self._activity_request_state = None
-            self.report_tabs.activity_log_tab.update_filter_options(options)
-            self.report_tabs.activity_log_tab.set_filter_controls_enabled(True)
-            queued = self._queued_activity_filter_state
-            self._queued_activity_filter_state = None
-            if queued is not None and queued != state:
-                self._start_activity_filter_refresh(queued)
+        # Prevent double processing of the same filter state
+        if hasattr(self, '_is_loading_filters') and self._is_loading_filters:
             return
+            
+        self._is_loading_filters = True
+        try:
+            if (
+                self._activity_options_refresh_pending
+                and self._activity_request_state is not None
+                and state == self._activity_request_state
+            ):
+                self._activity_options_refresh_pending = False
+                self._activity_request_state = None
+                self.report_tabs.activity_log_tab.update_filter_options(options)
+                self.report_tabs.activity_log_tab.set_filter_controls_enabled(True)
+                queued = self._queued_activity_filter_state
+                self._queued_activity_filter_state = None
+                if queued is not None and queued != state:
+                    self._start_activity_filter_refresh(queued)
+                return
 
-        self._options_refresh_pending = False
-        prior_state = self.filter_panel.current_state()
-        self.filter_panel.populate(options, emit=False)
-        self.filter_panel.setEnabled(True)
-        refreshed_state = self.filter_panel.current_state()
-        self._log(f"Filters updated: {refreshed_state}")
-        self.filter_panel.apply_button.setEnabled(False)
-        self._cached_filter_options = options
-        self.report_tabs.update_activity_filter_options(options)
-        target_state = self._pending_state_for_data
-        if target_state is not None:
-            self._pending_state_for_data = None
-        elif self._current_filter_state is None:
-            target_state = refreshed_state
-        if target_state is None:
-            return
-        self._refresh_sales_transactions(target_state)
+            self._options_refresh_pending = False
+            prior_state = self.filter_panel.current_state()
+            self.filter_panel.populate(options, emit=False)
+            self.filter_panel.setEnabled(True)
+            refreshed_state = self.filter_panel.current_state()
+            self._log("Filters updated")
+            self.filter_panel.apply_button.setEnabled(False)
+            self._cached_filter_options = options
+            self.report_tabs.update_activity_filter_options(options)
+            target_state = self._pending_state_for_data
+            if target_state is not None:
+                self._pending_state_for_data = None
+            elif self._current_filter_state is None:
+                target_state = refreshed_state
+            if target_state is not None:
+                self._refresh_sales_transactions(target_state)
+        finally:
+            self._is_loading_filters = False
 
     @QtCore.pyqtSlot(object, object)
     def _on_filters_failed(self, state: FilterState, exc: Exception) -> None:
@@ -6064,7 +6086,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._base_cache_covers(current_state):
             self._active_fetch_generation += 1
             generation = self._active_fetch_generation
-            self._log(f"[FETCH] Starting data refresh (generation {generation}) for state: {current_state}")
+            self._log(f"Starting data refresh (generation {generation})")
 
             task = BackgroundTask(self.repository.fetch_sales_transactions, current_state)
             task.signals.finished.connect(
