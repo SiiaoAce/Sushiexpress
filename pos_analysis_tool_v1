@@ -1558,6 +1558,23 @@ class DataRepository(QtCore.QObject):
         if is_epoint and (not selected_brands or 'sushi_epoint_pos_live' in selected_brands):
             self.log_message.emit("[FILTER] Loading Epoint-specific filter options")
 
+            def _load_latest_epoint_db() -> Optional[duckdb.DuckDBPyConnection]:
+                cache_paths = self.cache_paths.get('sushi_epoint_pos_live')
+                if cache_paths is None:
+                    self.log_message.emit("[FILTER] Epoint cache path not configured")
+                    return None
+                date_files = cache_paths.get_epoint_date_files()
+                if not date_files:
+                    self.log_message.emit("[FILTER] No Epoint date files available")
+                    return None
+                latest_file = sorted(date_files, key=lambda x: x[1], reverse=True)[0][0]
+                self.log_message.emit(f"[FILTER] Processing Epoint data from {latest_file}")
+                try:
+                    return duckdb.connect(str(latest_file), read_only=True)
+                except Exception as exc:
+                    self.log_message.emit(f"[FILTER] Unable to open Epoint DuckDB {latest_file}: {exc}")
+                    return None
+
         targets: List[str] = selected_brands[:] if selected_brands else list(DATABASES)
         if not targets:
             return options
@@ -1632,127 +1649,123 @@ class DataRepository(QtCore.QObject):
             # Skip regular processing for Epoint data, we'll handle it specially
             if db_name == 'sushi_epoint_pos_live':
                 self.log_message.emit("[FILTER] Processing Epoint data with special handling")
+                if conn:
+                    conn.close()
+                epoint_conn = _load_latest_epoint_db()
+                if epoint_conn is None:
+                    continue
                 try:
-                    # Get outlets (store names)
-                    outlets_query = """
-                    SELECT DISTINCT store_name 
-                    FROM raw_details 
-                    WHERE store_name IS NOT NULL
-                    """
-                    outlets = [str(row[0]) for row in conn.execute(outlets_query).fetchall()]
+                    tables = {row[0].lower() for row in epoint_conn.execute("SHOW TABLES").fetchall()}
+                    if not {'raw_details', 'raw_payments'}.issubset(tables):
+                        self.log_message.emit("[FILTER] Epoint database missing required tables")
+                        continue
+
+                    outlets = [
+                        str(row[0])
+                        for row in epoint_conn.execute(
+                            "SELECT DISTINCT store_name FROM raw_details WHERE store_name IS NOT NULL"
+                        ).fetchall()
+                    ]
                     aggregated["outlets"].update(outlets)
-                    
-                    # Get payment methods - map to specific payment types
-                    payments_query = """
-                    SELECT DISTINCT 
-                        CASE 
-                            -- Map specific payment types
-                            WHEN UPPER(TRIM(payment_name)) = 'AMEX' THEN 'AMEX'
-                            WHEN UPPER(TRIM(payment_name)) IN ('MASTER', 'MC') THEN 'MASTER CARD'
-                            WHEN UPPER(TRIM(payment_name)) = 'VISA' THEN 'VISA'
-                            WHEN UPPER(TRIM(payment_name)) = 'VOUCHER' THEN 'VOUCHER'
-                            WHEN UPPER(TRIM(payment_name)) = 'DBSMAX' THEN 'DBS MAX'
-                            WHEN UPPER(TRIM(payment_name)) = 'NETS' THEN 'NETS'
-                            -- Fallback mappings for other cases
-                            WHEN UPPER(payment_name) LIKE '%CASH%' THEN 'CASH'
-                            WHEN UPPER(payment_name) LIKE '%AMEX%' THEN 'AMEX'
-                            WHEN UPPER(payment_name) LIKE '%MASTER%' OR UPPER(payment_name) LIKE '%MC%' THEN 'MASTER CARD'
-                            WHEN UPPER(payment_name) LIKE '%VISA%' THEN 'VISA'
-                            WHEN UPPER(payment_name) LIKE '%VOUCHER%' THEN 'VOUCHER'
-                            WHEN UPPER(payment_name) LIKE '%DBS%' OR UPPER(payment_name) LIKE '%MAX%' THEN 'DBS MAX'
-                            WHEN UPPER(payment_name) LIKE '%NETS%' THEN 'NETS'
-                            WHEN UPPER(payment_name) LIKE '%GRAB%' THEN 'GRABPAY'
-                            WHEN UPPER(payment_name) LIKE '%TOUCH%' OR UPPER(payment_name) LIKE '%TOUCHNGO%' THEN 'TOUCH N GO'
-                            WHEN UPPER(payment_name) LIKE '%BANK%' OR UPPER(payment_name) LIKE '%TRANSFER%' THEN 'BANK TRANSFER'
-                            WHEN UPPER(payment_name) LIKE '%EWALLET%' THEN 'EWALLET'
-                            ELSE UPPER(COALESCE(TRIM(payment_name), 'UNKNOWN'))
-                        END as payment_method
-                    FROM raw_payments 
-                    WHERE payment_name IS NOT NULL 
-                    AND payment_name != ''
-                    """
-                    payments = [str(row[0]) for row in conn.execute(payments_query).fetchall() if row[0] and str(row[0]).strip()]
-                    aggregated["payments"].update(payments)
-                    
-                    # Log the payment methods found
-                    self.log_message.emit(f"[FILTER] Found payment methods: {', '.join(payments) if payments else 'None'}")
-                    
-                    # Get categories
-                    categories_query = """
-                    SELECT DISTINCT category_name 
-                    FROM raw_details 
-                    WHERE category_name IS NOT NULL 
-                    AND category_name != ''
-                    """
-                    categories = [str(row[0]) for row in conn.execute(categories_query).fetchall()]
+
+                    payments_rows = epoint_conn.execute(
+                        "SELECT DISTINCT payment_name FROM raw_payments WHERE payment_name IS NOT NULL AND payment_name != ''"
+                    ).fetchall()
+                    normalized_payments = []
+                    for (raw_name,) in payments_rows:
+                        name = str(raw_name or '').strip()
+                        if not name:
+                            continue
+                        upper = name.upper()
+                        if upper == 'AMEX' or 'AMEX' in upper:
+                            normalized = 'AMEX'
+                        elif upper in {'MASTER', 'MC'} or 'MASTER' in upper or 'MC' in upper:
+                            normalized = 'MASTER CARD'
+                        elif upper == 'VISA' or 'VISA' in upper:
+                            normalized = 'VISA'
+                        elif upper == 'VOUCHER' or 'VOUCHER' in upper:
+                            normalized = 'VOUCHER'
+                        elif upper == 'DBSMAX' or 'DBS' in upper or 'MAX' in upper:
+                            normalized = 'DBS MAX'
+                        elif upper == 'NETS' or 'NETS' in upper:
+                            normalized = 'NETS'
+                        elif upper == 'GRABPAY' or 'GRAB' in upper:
+                            normalized = 'GRABPAY'
+                        elif 'TOUCH' in upper:
+                            normalized = 'TOUCH N GO'
+                        elif 'BANK' in upper or 'TRANSFER' in upper:
+                            normalized = 'BANK TRANSFER'
+                        elif 'EWALLET' in upper:
+                            normalized = 'EWALLET'
+                        elif 'CASH' in upper:
+                            normalized = 'CASH'
+                        else:
+                            normalized = upper
+                        normalized_payments.append(normalized)
+                    aggregated["payments"].update(normalized_payments)
+                    if normalized_payments:
+                        self.log_message.emit(
+                            f"[FILTER] Found payment methods: {', '.join(sorted(set(normalized_payments)))}"
+                        )
+
+                    categories = [
+                        str(row[0])
+                        for row in epoint_conn.execute(
+                            "SELECT DISTINCT category_name FROM raw_details WHERE category_name IS NOT NULL AND category_name != ''"
+                        ).fetchall()
+                    ]
                     aggregated["categories"].update(categories)
-                    
-                    # Get products
-                    products_query = """
-                    SELECT DISTINCT item_name 
-                    FROM raw_details 
-                    WHERE item_name IS NOT NULL 
-                    AND item_name != ''
-                    """
-                    products = [str(row[0]) for row in conn.execute(products_query).fetchall()]
+
+                    products = [
+                        str(row[0])
+                        for row in epoint_conn.execute(
+                            "SELECT DISTINCT item_name FROM raw_details WHERE item_name IS NOT NULL AND item_name != ''"
+                        ).fetchall()
+                    ]
                     aggregated["products"].update(products)
-                    
-                    # Get discounts
-                    discounts_query = """
-                    SELECT DISTINCT discount_name 
-                    FROM raw_details 
-                    WHERE discount_name IS NOT NULL 
-                    AND discount_name != ''
-                    """
-                    discounts = [str(row[0]) for row in conn.execute(discounts_query).fetchall()]
+
+                    discounts = [
+                        str(row[0])
+                        for row in epoint_conn.execute(
+                            "SELECT DISTINCT discount_name FROM raw_details WHERE discount_name IS NOT NULL AND discount_name != ''"
+                        ).fetchall()
+                    ]
                     aggregated["discounts"].update(discounts)
-                    
-                    # Get dates for months and weeks
-                    dates_query = """
-                    SELECT DISTINCT c_date 
-                    FROM raw_details 
-                    WHERE c_date IS NOT NULL
-                    """
-                    dates = [row[0] for row in conn.execute(dates_query).fetchall() if row[0]]
-                    
-                    # Process months
+
+                    date_rows = epoint_conn.execute(
+                        "SELECT DISTINCT c_date FROM raw_details WHERE c_date IS NOT NULL"
+                    ).fetchall()
                     months = set()
-                    for date_val in dates:
-                        if isinstance(date_val, str):
-                            try:
-                                dt = datetime.strptime(date_val, '%Y-%m-%d')
-                                months.add(dt.strftime('%Y-%m'))
-                            except (ValueError, TypeError):
-                                continue
-                        elif hasattr(date_val, 'strftime'):
-                            months.add(date_val.strftime('%Y-%m'))
-                    aggregated["months"].update(months)
-                    
-                    # Process weeks
                     weeks = set()
-                    for date_val in dates:
+                    for (date_val,) in date_rows:
                         if isinstance(date_val, str):
                             try:
                                 dt = datetime.strptime(date_val, '%Y-%m-%d')
-                                weeks.add(dt.strftime('%Y-W%V'))
                             except (ValueError, TypeError):
                                 continue
-                        elif hasattr(date_val, 'strftime'):
-                            weeks.add(date_val.strftime('%Y-W%V'))
+                        else:
+                            dt = pd.to_datetime(date_val, errors='coerce')
+                            if pd.isna(dt):
+                                continue
+                        months.add(dt.strftime('%Y-%m'))
+                        weeks.add(dt.strftime('%Y-W%V'))
+                    aggregated["months"].update(months)
                     aggregated["weeks"].update(weeks)
-                    
+
                     self.log_message.emit(
-                        f"[FILTER] {db_name}: loaded {len(outlets)} outlets, {len(payments)} payments, "
+                        f"[FILTER] {db_name}: loaded {len(outlets)} outlets, {len(normalized_payments)} payments, "
                         f"{len(categories)} categories, {len(products)} products, {len(discounts)} discounts, "
                         f"{len(months)} months, {len(weeks)} weeks"
                     )
-                    
                 except Exception as e:
-                    self.log_message.emit(f"[FILTER] Error processing Epoint data: {str(e)}")
+                    self.log_message.emit(f"[FILTER] Error processing Epoint data: {e}")
                     import traceback
                     self.log_message.emit(f"[FILTER] {traceback.format_exc()}")
-                
-                # Skip the regular processing for Epoint data
+                finally:
+                    try:
+                        epoint_conn.close()
+                    except Exception:
+                        pass
                 continue
 
             def _run_with_quarantine(query: str, parameters: Sequence[object]) -> Optional[List[tuple]]:
@@ -2000,244 +2013,232 @@ class DataRepository(QtCore.QObject):
         where_clause = " AND ".join(conditions)
 
         if is_epoint:
+            stock_master_path = Path("Stock master Total.xlsx")
+            if stock_master_path.exists():
+                try:
+                    stock_df = pd.read_excel(
+                        stock_master_path,
+                        usecols=['STOCK', 'AC_GROUP']
+                    ).dropna(subset=['STOCK', 'AC_GROUP'])
+                    stock_df = stock_df.rename(columns={'STOCK': 'stock_code', 'AC_GROUP': 'sales_category'})
+                    stock_df['stock_code'] = stock_df['stock_code'].astype(str).str.strip()
+                    stock_df['sales_category'] = stock_df['sales_category'].astype(str).str.strip().str.upper()
+                except Exception as exc:  # pragma: no cover - defensive
+                    self.log_message.emit(f"[EPOINT] Failed to load stock master: {exc}")
+                    stock_df = pd.DataFrame({'stock_code': pd.Series(dtype='string'), 'sales_category': pd.Series(dtype='string')})
+            else:
+                stock_df = pd.DataFrame({'stock_code': pd.Series(dtype='string'), 'sales_category': pd.Series(dtype='string')})
+
+            def _build_epoint_detail_query(connection: duckdb.DuckDBPyConnection) -> str:
+                receipt_info = connection.execute("PRAGMA table_info('raw_receipts')").fetchall()
+                receipt_cols = {row[1] for row in receipt_info}
+
+                def _combine(exprs: List[str], default: str) -> str:
+                    valid = [expr for expr in exprs if expr]
+                    if not valid:
+                        return default
+                    if len(valid) == 1:
+                        return valid[0]
+                    return f"COALESCE({', '.join(valid)})"
+
+                receipt_candidates: List[str] = []
+                if 'receipt_no' in receipt_cols:
+                    receipt_candidates.append("NULLIF(TRIM(CAST(receipt_no AS VARCHAR)), '')")
+                if 'sales_no' in receipt_cols:
+                    receipt_candidates.append("NULLIF(TRIM(CAST(sales_no AS VARCHAR)), '')")
+                if not receipt_candidates:
+                    raise RuntimeError("[EPOINT] raw_receipts missing receipt identifier column (receipt_no/sales_no)")
+                receipt_key_expr = _combine(receipt_candidates, "''")
+
+                store_expr_candidates: List[str] = []
+                if 'store_name' in receipt_cols:
+                    store_expr_candidates.append("NULLIF(TRIM(CAST(store_name AS VARCHAR)), '')")
+                if 'store_code' in receipt_cols:
+                    store_expr_candidates.append("NULLIF(TRIM(CAST(store_code AS VARCHAR)), '')")
+                store_name_expr = _combine(store_expr_candidates, "''")
+
+                terminal_candidates: List[str] = []
+                if 'terminal' in receipt_cols:
+                    terminal_candidates.append("TRIM(CAST(terminal AS VARCHAR))")
+                terminal_expr = _combine(terminal_candidates, "NULL")
+
+                is_void_candidates: List[str] = []
+                if 'is_void' in receipt_cols:
+                    is_void_candidates.append("CAST(is_void AS INTEGER)")
+                is_void_expr = _combine(is_void_candidates, "0")
+
+                return f"""
+                WITH stock_master_clean AS (
+                    SELECT
+                        TRIM(CAST(stock_code AS VARCHAR)) AS stock_code,
+                        UPPER(TRIM(sales_category)) AS sales_category
+                    FROM stock_master
+                ),
+                receipts_normalized AS (
+                    SELECT
+                        {receipt_key_expr} AS receipt_key,
+                        {store_name_expr} AS receipt_store_name,
+                        {terminal_expr} AS receipt_terminal,
+                        {is_void_expr} AS receipt_is_void
+                    FROM raw_receipts
+                ),
+                detail_with_order AS (
+                    SELECT
+                        d.c_date,
+                        COALESCE(d.store_code, '') AS store_code,
+                        COALESCE(NULLIF(d.store_name, ''), r.receipt_store_name, '') AS store_name,
+                        TRIM(CAST(d.sales_no AS VARCHAR)) AS sales_no,
+                        TRIM(CAST(d.item_no AS VARCHAR)) AS item_no,
+                        COALESCE(d.item_name, '') AS item_name,
+                        COALESCE(d.category_code, '') AS category_code,
+                        COALESCE(d.qty, 0.0) AS qty,
+                        COALESCE(d.sub_total, 0.0) AS sub_total,
+                        COALESCE(d.disc_name, '') AS disc_name,
+                        COALESCE(d.disc_amt, 0.0) AS disc_amt,
+                        COALESCE(d.pro_disc_amt, 0.0) AS pro_disc_amt,
+                        COALESCE(d.svc_amt, 0.0) AS svc_amt,
+                        COALESCE(d.tax_amt, 0.0) AS tax_amt,
+                        COALESCE(d.take_away_item, '') AS take_away_item,
+                        COALESCE(d.item_sub_total, 0.0) AS item_sub_total,
+                        COALESCE(d.payment_methods, '') AS payment_methods,
+                        COALESCE(sm.sales_category, '') AS stock_sales_category,
+                        r.receipt_terminal AS terminal,
+                        CASE
+                            WHEN COALESCE(sm.sales_category, '') IN ('DINE-IN', 'TAKEAWAY', 'DELIVERY') THEN sm.sales_category
+                            WHEN COALESCE(d.svc_amt, 0) > 0 THEN 'DINE-IN'
+                            WHEN UPPER(COALESCE(d.take_away_item, '')) = 'Y' THEN 'TAKEAWAY'
+                            WHEN r.receipt_terminal IN ('T004', 'T005', 'T006') THEN 'DINE-IN'
+                            WHEN r.receipt_terminal = 'T001' THEN 'TAKEAWAY'
+                            ELSE 'UNKNOWN'
+                        END AS final_order_type
+                    FROM raw_details d
+                    LEFT JOIN receipts_normalized r
+                      ON TRIM(CAST(d.sales_no AS VARCHAR)) = r.receipt_key
+                    LEFT JOIN stock_master_clean sm
+                      ON TRIM(CAST(d.item_no AS VARCHAR)) = sm.stock_code
+                    WHERE COALESCE(r.receipt_is_void, 0) = 0
+                )
+                SELECT
+                    c_date,
+                    store_code,
+                    store_name,
+                    sales_no,
+                    item_no,
+                    item_name,
+                    category_code,
+                    qty,
+                    sub_total,
+                    disc_name,
+                    disc_amt,
+                    pro_disc_amt,
+                    svc_amt,
+                    tax_amt,
+                    take_away_item,
+                    item_sub_total,
+                    payment_methods,
+                    stock_sales_category AS sales_category,
+                    final_order_type,
+                    CASE
+                        WHEN final_order_type IN ('TAKEAWAY', 'DELIVERY') THEN COALESCE(sub_total, 0) / 1.09
+                        ELSE COALESCE(sub_total, 0)
+                    END AS net_amount,
+                    '{db_name}' AS source_database
+                FROM detail_with_order
+                """
+
             # For Epoint data, we need to handle date-based database files
             cache_paths = self.cache_paths[db_name]
             date_files = cache_paths.get_epoint_date_files()
-            
+
             if not date_files:
                 self.log_message.emit(f"[EPOINT] No valid date-based database files found for {db_name}")
                 return SalesRawFrames(detail=pd.DataFrame(), payments=pd.DataFrame())
-                
-            # Get the most recent database file that matches our date range
+
             date_files_sorted = sorted(date_files, key=lambda x: x[1], reverse=True)
-            selected_file = date_files_sorted[0][0]  # Get the path from the first (most recent) file
-            
+            selected_file = date_files_sorted[0][0]
+
             self.log_message.emit(f"[EPOINT] Loading data from: {selected_file}")
             try:
                 conn = duckdb.connect(str(selected_file), read_only=True)
-                # Double-check that tables exist (should be true since get_epoint_date_files already checked)
+            except Exception as exc:
+                self.log_message.emit(f"[EPOINT] Unable to open {selected_file}: {exc}")
+                return SalesRawFrames(detail=pd.DataFrame(), payments=pd.DataFrame())
+
+            try:
+                conn.register('stock_master', stock_df)
                 tables = conn.execute("SHOW TABLES").fetchall()
                 table_names = {t[0].lower() for t in tables}
-                
-                if 'raw_details' in table_names and 'raw_payments' in table_names:
-                    # Tables exist, use them
-                    try:
-                        details_query = """
-                            SELECT
-                                c_date,
-                                store_name,
-                                sales_no,
-                                item_name AS item_no,
-                                item_name,
-                                '' AS category_code,
-                                qty,
-                                sub_total,
-                                disc_name,
-                                disc_amt,
-                                pro_disc_amt,
-                                svc_amt,
-                                tax_amt,
-                                '' AS take_away_item,
-                                item_sub_total,
-                                payment_methods,
-                                ? AS source_database
-                            FROM raw_details
-                        """
-                        details = conn.execute(details_query, [db_name]).fetchdf()
-                        
-                        payments_query = """
-                            SELECT DISTINCT
-                                c_date,
-                                store_name,
-                                sales_no,
-                                ? AS source_database,
-                                payment_name,
-                                tender_amt AS tender_amount
-                            FROM raw_payments
-                        """
-                        payments = conn.execute(payments_query, [db_name]).fetchdf()
-                        
-                        conn.close()
-                        
-                        # Apply date filtering
-                        if date_from:
-                            details = details[details['c_date'] >= pd.Timestamp(date_from)]
-                            payments = payments[payments['c_date'] >= pd.Timestamp(date_from)]
-                            
-                        if date_to:
-                            details = details[details['c_date'] <= pd.Timestamp(date_to)]
-                            payments = payments[payments['c_date'] <= pd.Timestamp(date_to)]
-                        
-                        # Ensure proper column ordering and types
-                        if not details.empty:
-                            details = details.astype({
-                                'c_date': 'datetime64[ns]',
-                                'store_name': 'string',
-                                'sales_no': 'string',
-                                'item_no': 'string',
-                                'item_name': 'string',
-                                'category_code': 'string',
-                                'disc_name': 'string',
-                                'payment_methods': 'string'
-                            })
-                            
-                        if not payments.empty:
-                            payments = payments.astype({
-                                'c_date': 'datetime64[ns]',
-                                'store_name': 'string',
-                                'sales_no': 'string',
-                                'source_database': 'string',
-                                'payment_name': 'string'
-                            })
-                        
-                        self.log_message.emit(f"[EPOINT] Loaded {len(details)} details and {len(payments)} payments from {selected_file}")
-                        return SalesRawFrames(detail=details, payments=payments)
-                        
-                    except Exception as e:
-                        self.log_message.emit(f"[EPOINT] Error querying database: {str(e)}")
-                        import traceback
-                        self.log_message.emit(traceback.format_exc())
-                        if 'conn' in locals():
-                            try:
-                                conn.close()
-                            except:
-                                pass
-                        return SalesRawFrames(detail=pd.DataFrame(), payments=pd.DataFrame())
-                
-                # If we get here, there was an error with the selected file
-                if 'conn' in locals():
-                    try:
-                        conn.close()
-                    except:
-                        pass
-                return SalesRawFrames(detail=pd.DataFrame(), payments=pd.DataFrame())
-                
+
+                if not {'raw_details', 'raw_payments', 'raw_receipts'}.issubset(table_names):
+                    self.log_message.emit(f"[EPOINT] Missing required tables in {selected_file}")
+                    return SalesRawFrames(detail=pd.DataFrame(), payments=pd.DataFrame())
+
+                detail_query = _build_epoint_detail_query(conn)
+                details = conn.execute(detail_query).fetchdf()
+
+                payments_query = """
+                    SELECT DISTINCT
+                        c_date,
+                        store_name,
+                        sales_no,
+                        ? AS source_database,
+                        payment_name,
+                        tender_amt AS tender_amount
+                    FROM raw_payments
+                """
+                payments = conn.execute(payments_query, [db_name]).fetchdf()
             except Exception as e:
-                self.log_message.emit(f"[EPOINT] Unexpected error: {str(e)}")
+                self.log_message.emit(f"[EPOINT] Error executing queries on {selected_file}: {e}")
                 import traceback
                 self.log_message.emit(traceback.format_exc())
-                if 'conn' in locals():
-                    try:
-                        conn.close()
-                    except:
-                        pass
                 return SalesRawFrames(detail=pd.DataFrame(), payments=pd.DataFrame())
-        
-        # This code is for non-Epoint data or if Epoint processing is skipped
-        all_details = []
-        all_payments = []
-        
-        # Get the list of database files to process
-        try:
-            date_files = self.cache_paths[db_name].get_epoint_date_files()
-            filtered_files = [f[0] for f in date_files]  # Extract just the file paths
-            
-            for db_file in filtered_files:
+            finally:
                 try:
-                    # Connect to the date-specific database file
-                    conn = duckdb.connect(str(db_file), read_only=True)
-                    
-                    # Check if tables exist
-                    tables = conn.execute("SHOW TABLES").fetchall()
-                    table_names = {t[0].lower() for t in tables}
-                    
-                    if 'raw_details' not in table_names or 'raw_payments' not in table_names:
-                        self.log_message.emit(f"[EPOINT] Missing required tables in {db_file}")
-                        continue
-                    
-                    # Query for details
-                    details_query = """
-                        SELECT
-                            c_date,
-                            store_name,
-                            sales_no,
-                            item_name AS item_no,
-                            item_name,
-                            '' AS category_code,
-                            qty,
-                            sub_total,
-                            disc_name,
-                            disc_amt,
-                            pro_disc_amt,
-                            svc_amt,
-                            tax_amt,
-                            '' AS take_away_item,
-                            item_sub_total,
-                            payment_methods,
-                            ? AS source_database
-                        FROM raw_details
-                    """
-                    details = conn.execute(details_query, [db_name]).fetchdf()
-                    if not details.empty:
-                        all_details.append(details)
-                    
-                    # Query for payments
-                    payments_query = """
-                        SELECT DISTINCT
-                            c_date,
-                            store_name,
-                            sales_no,
-                            ? AS source_database,
-                            payment_name,
-                            tender_amt AS tender_amount
-                        FROM raw_payments
-                    """
-                    payments = conn.execute(payments_query, [db_name]).fetchdf()
-                    if not payments.empty:
-                        all_payments.append(payments)
-                        
                     conn.close()
-                    
-                except Exception as e:
-                    self.log_message.emit(f"[EPOINT] Error processing {db_file}: {str(e)}")
-                    if 'conn' in locals():
-                        conn.close()
-                
-                # Combine all results
-                details_df = pd.concat(all_details, ignore_index=True) if all_details else pd.DataFrame()
-                payments_df = pd.concat(all_payments, ignore_index=True) if all_payments else pd.DataFrame()
-                
-                # Apply date filtering in memory (since we already filtered by file dates)
-                if not details_df.empty and date_from:
-                    details_df = details_df[details_df['c_date'] >= pd.Timestamp(date_from)]
-                if not payments_df.empty and date_from:
-                    payments_df = payments_df[payments_df['c_date'] >= pd.Timestamp(date_from)]
-                    
-                if not details_df.empty and date_to:
-                    details_df = details_df[details_df['c_date'] <= pd.Timestamp(date_to)]
-                if not payments_df.empty and date_to:
-                    payments_df = payments_df[payments_df['c_date'] <= pd.Timestamp(date_to)]
-                
-                # Ensure proper column ordering and types
-                if not details_df.empty:
-                    details_df = details_df.astype({
-                        'c_date': 'datetime64[ns]',
-                        'store_name': 'string',
-                        'sales_no': 'string',
-                        'item_no': 'string',
-                        'item_name': 'string',
-                        'category_code': 'string',
-                        'disc_name': 'string',
-                        'payment_methods': 'string'
-                    })
-                    
-                if not payments_df.empty:
-                    payments_df = payments_df.astype({
-                        'c_date': 'datetime64[ns]',
-                        'store_name': 'string',
-                        'sales_no': 'string',
-                        'source_database': 'string',
-                        'payment_name': 'string'
-                    })
-                
-                return SalesRawFrames(detail=details_df, payments=payments_df)
-                
-        except Exception as e:
-            self.log_message.emit(f"[EPOINT] Error in Epoint data loading: {str(e)}")
-            import traceback
-            self.log_message.emit(traceback.format_exc())
-            return SalesRawFrames(detail=pd.DataFrame(), payments=pd.DataFrame())
-    
+                except Exception:
+                    pass
+
+            if date_from:
+                details = details[details['c_date'] >= pd.Timestamp(date_from)]
+                payments = payments[payments['c_date'] >= pd.Timestamp(date_from)]
+            if date_to:
+                details = details[details['c_date'] <= pd.Timestamp(date_to)]
+                payments = payments[payments['c_date'] <= pd.Timestamp(date_to)]
+
+            if not details.empty:
+                details = details.astype({
+                    'c_date': 'datetime64[ns]',
+                    'store_code': 'string',
+                    'store_name': 'string',
+                    'sales_no': 'string',
+                    'item_no': 'string',
+                    'item_name': 'string',
+                    'category_code': 'string',
+                    'disc_name': 'string',
+                    'payment_methods': 'string',
+                    'sales_category': 'string',
+                    'final_order_type': 'string',
+                    'take_away_item': 'string',
+                    'source_database': 'string'
+                })
+                details['net_amount'] = pd.to_numeric(details['net_amount'], errors='coerce').fillna(0.0)
+                details['qty'] = pd.to_numeric(details['qty'], errors='coerce').fillna(0.0)
+                details['item_sub_total'] = pd.to_numeric(details['item_sub_total'], errors='coerce').fillna(0.0)
+
+            if not payments.empty:
+                payments = payments.astype({
+                    'c_date': 'datetime64[ns]',
+                    'store_name': 'string',
+                    'sales_no': 'string',
+                    'source_database': 'string',
+                    'payment_name': 'string'
+                })
+
+            self.log_message.emit(
+                f"[EPOINT] Loaded {len(details)} details and {len(payments)} payments from {selected_file}"
+            )
+            return SalesRawFrames(detail=details, payments=payments)
+
         # Standard SQL for non-Epoint data
         sales_sql = f"""
             WITH item_lookup AS (
@@ -2579,11 +2580,14 @@ class DataRepository(QtCore.QObject):
         else:
             takeaway_flag = pd.Series("", index=detail_frame.index, dtype="object")
 
-        express_mask = source_db.eq("sushi_express_pos_live")
-        takeaway_mask = takeaway_flag.eq("Y")
-        tax_deduction = np.where(express_mask & ~takeaway_mask, 0.0, tax_amt)
-
-        detail_frame["net_item"] = sub_total - disc_amt - pro_disc_amt - tax_deduction + svc_amt
+        if "net_amount" in detail_frame.columns:
+            net_amount_series = pd.to_numeric(detail_frame.get("net_amount"), errors="coerce").fillna(0.0)
+            detail_frame["net_item"] = net_amount_series
+        else:
+            express_mask = source_db.eq("sushi_express_pos_live")
+            takeaway_mask = takeaway_flag.eq("Y")
+            tax_deduction = np.where(express_mask & ~takeaway_mask, 0.0, tax_amt)
+            detail_frame["net_item"] = sub_total - disc_amt - pro_disc_amt - tax_deduction + svc_amt
 
         receipt_totals = (
             detail_frame.groupby(["c_date", "store_name", "sales_no"], as_index=False)
