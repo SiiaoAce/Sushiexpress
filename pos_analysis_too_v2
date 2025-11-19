@@ -8,7 +8,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import deque, OrderedDict
+from collections import deque
 import threading
 import functools
 import itertools
@@ -16,21 +16,13 @@ import json
 import hashlib
 import math
 import os
-import queue
-import random
-import re
-import shutil
-import string
 import statistics
-import time
-import textwrap
 import uuid
 import calendar
 from collections import defaultdict
 
 import duckdb
 import pandas as pd
-import pyodbc
 import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -67,7 +59,6 @@ DATABASES = [
     "sushi_gogo_pos_live",
     "sushi_express_pos_live",
     "sushi_plus_pos_live",
-    "sushi_epoint_pos_live",
 ]
 COMBINED_DATABASE = "sushi_pos_all"
 MAX_SYNC_WORKERS = max(1, min(len(DATABASES), 4))
@@ -97,48 +88,40 @@ DISCOUNT_ANALYSIS_COLUMNS: Dict[str, List[str]] = {
         "Outlet",
         "Discount Name",
         "Discount Sales",
-        "Quantity",
         "Transaction",
         "Bill Sales",
         "Discount Ratio %",
         "Transaction Ratio %",
-        "Quantity Ratio %",
     ],
     "Weekly": [
         "Period",
         "Outlet",
         "Discount Name",
         "Discount Sales",
-        "Quantity",
         "Transaction",
         "Bill Sales",
         "Discount Ratio %",
         "Transaction Ratio %",
-        "Quantity Ratio %",
     ],
     "Monthly": [
         "Period",
         "Outlet",
         "Discount Name",
         "Discount Sales",
-        "Quantity",
         "Transaction",
         "Bill Sales",
         "Discount Ratio %",
         "Transaction Ratio %",
-        "Quantity Ratio %",
     ],
     "Period": [
         "Period",
         "Outlet",
         "Discount Name",
         "Discount Sales",
-        "Quantity",
         "Transaction",
         "Bill Sales",
         "Discount Ratio %",
         "Transaction Ratio %",
-        "Quantity Ratio %",
     ],
 }
 
@@ -532,109 +515,6 @@ def bilingual(cn: str, en: str) -> str:
     return f"{cn}\n{en}"
 
 
-EPOINT_STORE_NAME_MAP: Dict[str, str] = OrderedDict(
-    {
-        "204": "204- WEST GATE",
-        "206": "206- SELETAR MALL",
-        "207": "207- SERANGOON NEX",
-        "208": "208- SUN PLAZA",
-        "209": "209- IMM MALL",
-        "211": "211- WHITE SANDS",
-        "212": "212- JURONG POINT",
-        "214": "214- HILLION MALL",
-        "215": "215- HEARTLAND MALL",
-        "216": "216- WATERWAY POINT",
-        "217": "217- HEARTBEAT BEDOK",
-        "218": "218- NORTHPOINT CITY",
-        "221": "221- FUNAN",
-        "222": "222- PAYA LEBAR QUARTER",
-        "223": "223- HOUGANG MALL",
-        "224": "224- PARKWAY PARADE",
-        "225": "225- CLEMENTI MALL",
-        "226": "226- CENTURY SQUARE",
-        "227": "227- SENGKANG GRAND",
-        "228": "228- WEST MALL",
-        "229": "229- PARKWAY PARADE 2",
-        "301": "301 - WOODLAND",
-        "302": "302 - GRANTRAL MALL",
-        "303": "303 - TAMPINES",
-        "304": "304 - TOA PAYOH",
-        "306": "306 - J8",
-        "307": "307 - HGTO",
-        "308": "308 - OASIS",
-        "309": "309 - YEW TEE SQUARE",
-        "310": "310 - SENGKANG MRT",
-        "311": "311 - THE POIZ CENTRE",
-        "312": "312 - ANG MO KIO",
-        "313": "313 - CANBERRA PLAZA",
-        "314": "314 - BUKIT GOMBAK",
-        "401": "401 - BUGIS JUNCTION",
-        "402": "402 - 313 SOMERSET",
-        "403": "403 - TAMPINES ONE",
-    }
-)
-
-STORE_CODE_PATTERN = re.compile(r"(\d{3})")
-
-
-def _normalize_epoint_store_code(store_code: Optional[object]) -> str:
-    if store_code is None:
-        return ""
-    code = str(store_code).strip()
-    if not code or code.lower() in {"nan", "none"}:
-        return ""
-    match = STORE_CODE_PATTERN.search(code)
-    if match:
-        return match.group(1)
-    if code.isdigit() and len(code) == 3:
-        return code
-    return ""
-
-
-def _extract_epoint_store_code_from_name(store_name: Optional[object]) -> str:
-    if not store_name:
-        return ""
-    name = str(store_name).strip()
-    match = STORE_CODE_PATTERN.search(name)
-    if match:
-        return match.group(1)
-    return ""
-
-
-def _map_epoint_store_name(store_code: Optional[object], store_name: Optional[object]) -> str:
-    code = _normalize_epoint_store_code(store_code)
-    if not code:
-        code = _extract_epoint_store_code_from_name(store_name)
-    mapped = EPOINT_STORE_NAME_MAP.get(code)
-    name = (str(store_name).strip() if store_name else "")
-    if mapped:
-        return mapped
-    if name:
-        return f"{code} - {name.upper()}" if code else name.upper()
-    if code:
-        return f"{code} - UNKNOWN"
-    return ""
-
-
-def _discover_epoint_parquet_triplets(root: Path) -> List[Tuple[Path, Path, Path, date]]:
-    triplets: List[Tuple[Path, Path, Path, date]] = []
-    for detail_path in sorted(root.rglob("pos_*_details.parquet")):
-        match = re.search(r"pos_(\d{8})_details", detail_path.stem, re.IGNORECASE)
-        if not match:
-            continue
-        try:
-            run_date = datetime.strptime(match.group(1), "%Y%m%d").date()
-        except ValueError:
-            continue
-        payments_path = detail_path.with_name(detail_path.name.replace("_details", "_payments"))
-        receipts_path = detail_path.with_name(detail_path.name.replace("_details", "_receipts"))
-        if not payments_path.exists() or not receipts_path.exists():
-            continue
-        triplets.append((detail_path, payments_path, receipts_path, run_date))
-    triplets.sort(key=lambda entry: entry[3])
-    return triplets
-
-
 @dataclass
 class FilterState:
     date_from: Optional[date] = None
@@ -830,126 +710,10 @@ class DataCachePaths:
 
     @property
     def duckdb_path(self) -> Path:
-        if self.db_name == "sushi_epoint_pos_live":
-            print(f"[DEBUG] ===== STARTING EPOINT DB FILE SEARCH =====")
-            print(f"[DEBUG] Current working directory: {Path.cwd()}")
-            
-            # For Epoint, find the most recent date file
-            cache_dir = Path(".pos_cache") / self.db_name
-            print(f"[DEBUG] Looking for Epoint database files in: {cache_dir.absolute()}")
-            print(f"[DEBUG] Directory exists: {cache_dir.exists()}")
-            
-            date_files = self.get_epoint_date_files()
-            print(f"[DEBUG] Found {len(date_files)} Epoint database files")
-            
-            if date_files:
-                # Return the path from the most recent (should already be sorted by get_epoint_date_files)
-                most_recent = date_files[-1][0]  # Get the path from the (path, date) tuple
-                print(f"[DEBUG] Using most recent Epoint database file: {most_recent}")
-                print(f"[DEBUG] File exists: {most_recent.exists()}")
-                print(f"[DEBUG] ===== END EPOINT DB FILE SEARCH =====")
-                return most_recent
-            else:
-                print("[WARNING] No Epoint database files found. Falling back to default location.")
-                
-        # Default path for non-Epoint databases or if no date files found
         default_path = Path(".pos_cache") / self.db_name / "pos.duckdb"
-        print(f"[DEBUG] Using default database path: {default_path.absolute()}")
-        print(f"[DEBUG] Default path exists: {default_path.exists()}")
-        print(f"[DEBUG] ===== END EPOINT DB FILE SEARCH =====")
         return default_path
         
-    def get_epoint_date_files(self) -> List[Tuple[Path, date, List[str]]]:
-        """Get all date-based Epoint database files, sorted by date.
-        
-        Looks for files in the format: .pos_cache/sushi_epoint_pos_live/pos_YYYYMMDD.duckdb
-        
-        Returns:
-            List of tuples containing (file_path, date, table_names) for each database file
-        """
-        if self.db_name != "sushi_epoint_pos_live":
-            print(f"[DEBUG] Not an Epoint database: {self.db_name}")
-            return []
-            
-        epoint_dir = Path(".pos_cache") / self.db_name
-        date_files = []
-        
-        print(f"[DEBUG] Searching for Epoint database files in: {epoint_dir.absolute()}")
-        
-        # Check if the directory exists
-        if not epoint_dir.exists():
-            print(f"[ERROR] Epoint directory does not exist: {epoint_dir.absolute()}")
-            return []
-            
-        # List all files in the directory for debugging
-        print("[DEBUG] Directory contents:")
-        for item in epoint_dir.glob("*"):
-            print(f"  - {item.name} (dir: {item.is_dir()})")
-        
-        def check_db_file(db_path: Path) -> Tuple[Path, date, List[str]]:
-            """Check a database file and return its path, date, and table list."""
-            try:
-                # Extract date from filename (pos_YYYYMMDD.duckdb)
-                date_str = db_path.stem.split('_')[-1]
-                file_date = datetime.strptime(date_str, "%Y%m%d").date()
-                
-                # Check what tables exist in the database
-                try:
-                    conn = duckdb.connect(str(db_path), read_only=True)
-                    tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
-                    conn.close()
-                    print(f"[DEBUG] Found {len(tables)} tables in {db_path}: {', '.join(tables) or 'None'}")
-                    return (db_path, file_date, tables)
-                except Exception as e:
-                    print(f"[WARNING] Error checking tables in {db_path}: {str(e)}")
-                    return (db_path, file_date, [])
-                    
-            except (ValueError, IndexError) as e:
-                print(f"[WARNING] Error processing file {db_path}: {str(e)}")
-                return (db_path, date.today(), [])
-        
-        # Look for database files directly in the epoint directory
-        print("[DEBUG] Looking for direct database files...")
-        for db_file in epoint_dir.glob("pos_*.duckdb"):
-            result = check_db_file(db_file)
-            if result[2]:  # Only add if we found tables
-                date_files.append(result)
-        
-        # Also check for date-based subdirectories (format: YYYYMMDD/pos_YYYYMMDD.duckdb)
-        print("[DEBUG] Checking for date-based subdirectories...")
-        for date_dir in epoint_dir.glob("*"):
-            if not date_dir.is_dir() or not date_dir.name.isdigit() or len(date_dir.name) != 8:
-                continue
-                
-            db_file = date_dir / f"pos_{date_dir.name}.duckdb"
-            if db_file.exists():
-                result = check_db_file(db_file)
-                if result[2]:  # Only add if we found tables
-                    date_files.append(result)
-        
-        # Sort by date
-        date_files.sort(key=lambda x: x[1])
-        
-        # Filter out files that don't have the required tables
-        filtered_files = []
-        for db_file, file_date, tables in date_files:
-            tables_lower = [t.lower() for t in tables]
-            if 'raw_details' in tables_lower and 'raw_payments' in tables_lower:
-                filtered_files.append((db_file, file_date))
-                print(f"[DEBUG] Valid database file: {db_file} (tables: {', '.join(tables)})")
-            else:
-                print(f"[WARNING] Skipping {db_file}: missing required tables (found: {', '.join(tables) or 'none'})")
-        
-        print(f"[DEBUG] Found {len(filtered_files)} valid Epoint database files")
-        return filtered_files
-
-    def get_epoint_parquet_triplets(self) -> List[Tuple[Path, Path, Path, date]]:
-        if self.db_name != "sushi_epoint_pos_live":
-            return []
-        root = Path(".pos_cache") / self.db_name
-        if not root.exists():
-            return []
-        return _discover_epoint_parquet_triplets(root)
+    
 
     @property
     def parquet_root(self) -> Path:
@@ -1078,6 +842,12 @@ class DataRepository(QtCore.QObject):
     def duckdb_connection(self, db_name: str) -> duckdb.DuckDBPyConnection:
         if db_name not in self._connections:
             self._connections[db_name] = storage_duckdb.open_conn(db_name)
+            try:
+                threads = max(1, int(os.cpu_count() or 4))
+                self._connections[db_name].execute(f"PRAGMA threads={threads}")
+                self._connections[db_name].execute("PRAGMA enable_object_cache=true")
+            except Exception:
+                pass
         return self._connections[db_name]
 
     def close(self) -> None:
@@ -1088,6 +858,17 @@ class DataRepository(QtCore.QObject):
             self._save_activity_records()
         except Exception:
             pass
+
+    def _exec_fetch_df(self, conn: duckdb.DuckDBPyConnection, sql: str, params: Optional[Sequence[object]] = None) -> pd.DataFrame:
+        try:
+            rel = conn.execute(sql, params or [])
+            try:
+                tbl = rel.fetch_arrow_table()
+                return tbl.to_pandas(types_mapper=pd.ArrowDtype())
+            except Exception:
+                return rel.fetchdf()
+        except Exception:
+            return pd.DataFrame()
 
     # ------------------------------------------------------------------
     # Aggregation metadata helpers
@@ -1213,7 +994,12 @@ class DataRepository(QtCore.QObject):
                 detail_path = cache_path.aggregates_dir("details") / detail_filename
                 if detail_path.exists():
                     try:
-                        detail_frames.append(pd.read_parquet(detail_path))
+                        conn = self.duckdb_connection(db_name)
+                        df = conn.execute(
+                            "SELECT * FROM read_parquet(?)",
+                            [detail_path.as_posix()],
+                        ).fetchdf()
+                        detail_frames.append(df)
                     except Exception:
                         pass
 
@@ -1222,7 +1008,12 @@ class DataRepository(QtCore.QObject):
                 payments_path = cache_path.aggregates_dir("payments") / payments_filename
                 if payments_path.exists():
                     try:
-                        payment_frames.append(pd.read_parquet(payments_path))
+                        conn = self.duckdb_connection(db_name)
+                        df = conn.execute(
+                            "SELECT * FROM read_parquet(?)",
+                            [payments_path.as_posix()],
+                        ).fetchdf()
+                        payment_frames.append(df)
                     except Exception:
                         pass
 
@@ -1263,13 +1054,23 @@ class DataRepository(QtCore.QObject):
         if not detail_frame.empty:
             detail_filename = f"{key}_detail_{timestamp}.parquet"
             detail_path = cache_paths.aggregates_dir("details") / detail_filename
-            detail_frame.to_parquet(detail_path, index=False)
+            conn = self.duckdb_connection(db_name)
+            conn.register("_tmp_detail_frame", detail_frame)
+            conn.execute(
+                "COPY (SELECT * FROM _tmp_detail_frame) TO ? (FORMAT PARQUET)",
+                [detail_path.as_posix()],
+            )
             files["detail"] = detail_filename
 
         if not payments_frame.empty:
             payments_filename = f"{key}_payments_{timestamp}.parquet"
             payments_path = cache_paths.aggregates_dir("payments") / payments_filename
-            payments_frame.to_parquet(payments_path, index=False)
+            conn = self.duckdb_connection(db_name)
+            conn.register("_tmp_payments_frame", payments_frame)
+            conn.execute(
+                "COPY (SELECT * FROM _tmp_payments_frame) TO ? (FORMAT PARQUET)",
+                [payments_path.as_posix()],
+            )
             files["payments"] = payments_filename
 
         metadata.periods[key] = AggregationPeriodMeta(
@@ -1388,10 +1189,6 @@ class DataRepository(QtCore.QObject):
     # ------------------------------------------------------------------
     @staticmethod
     def _server_config(db_name: str) -> Optional[Dict[str, str]]:
-        # Return None for Epoint data to indicate it's not a SQL Server database
-        if db_name == "sushi_epoint_pos_live":
-            return None
-            
         return {
             "server": f"{SERVER},1433",
             "database": db_name,
@@ -1482,21 +1279,6 @@ class DataRepository(QtCore.QObject):
         failures: List[str] = []
 
         def _sync_database(db_name: str) -> bool:
-            # Handle Epoint data (local DuckDB files)
-            if db_name == "sushi_epoint_pos_live":
-                # Just check if we have any Epoint data files
-                epoint_files = list(Path(".pos_cache").glob("sushi_epoint_pos_live/pos_*.duckdb"))
-                if not epoint_files:
-                    self.log_message.emit(
-                        "[SYNC] sushi_epoint_pos_live: No Epoint data files found. "
-                        "Please run the Epoint data processing script first."
-                    )
-                    return False
-                self.log_message.emit(
-                    f"[SYNC] sushi_epoint_pos_live: Found {len(epoint_files)} data files"
-                )
-                return True
-                
             # Handle SQL Server databases
             cfg = {
                 "server": f"{SERVER},1433",
@@ -1636,6 +1418,12 @@ class DataRepository(QtCore.QObject):
 
     def load_filter_options(self, state: Optional[FilterState] = None) -> Dict[str, List[str]]:
         state = state or FilterState()
+        if state.date_from is None or state.date_to is None:
+            _today = date.today()
+            _yesterday = _today - timedelta(days=1)
+            _first = date(_today.year, _today.month, 1)
+            state.date_from = _first
+            state.date_to = _yesterday
         selected_brands = [db for db in state.brands if db in DATABASES]
         cache_key = tuple(sorted(selected_brands))
         if (
@@ -1671,28 +1459,6 @@ class DataRepository(QtCore.QObject):
             "brands": brand_options,
         }
         
-        # Special handling for Epoint data
-        is_epoint = 'sushi_epoint_pos_live' in (selected_brands or DATABASES)
-        if is_epoint and (not selected_brands or 'sushi_epoint_pos_live' in selected_brands):
-            self.log_message.emit("[FILTER] Loading Epoint-specific filter options")
-
-            def _load_latest_epoint_db() -> Optional[duckdb.DuckDBPyConnection]:
-                cache_paths = self.cache_paths.get('sushi_epoint_pos_live')
-                if cache_paths is None:
-                    self.log_message.emit("[FILTER] Epoint cache path not configured")
-                    return None
-                date_files = cache_paths.get_epoint_date_files()
-                if not date_files:
-                    self.log_message.emit("[FILTER] No Epoint date files available")
-                    return None
-                latest_file = sorted(date_files, key=lambda x: x[1], reverse=True)[0][0]
-                self.log_message.emit(f"[FILTER] Processing Epoint data from {latest_file}")
-                try:
-                    return duckdb.connect(str(latest_file), read_only=True)
-                except Exception as exc:
-                    self.log_message.emit(f"[FILTER] Unable to open Epoint DuckDB {latest_file}: {exc}")
-                    return None
-
         targets: List[str] = selected_brands[:] if selected_brands else list(DATABASES)
         if not targets:
             return options
@@ -1754,178 +1520,93 @@ class DataRepository(QtCore.QObject):
                 params.extend(state.payments)
             return clauses, params
 
-        for db_name in targets:
-            start_ts = time.perf_counter()
+        def _collect_buckets(db_name: str) -> Dict[str, Set[str]]:
+            local: Dict[str, Set[str]] = {
+                "outlets": set(), "months": set(), "weeks": set(), "payments": set(),
+                "categories": set(), "products": set(), "discounts": set(),
+            }
             try:
                 conn = self.duckdb_connection(db_name)
             except duckdb.Error as exc:
                 self.log_message.emit(f"[FILTER] {db_name}: cannot open DuckDB ({exc}).")
-                continue
-                
+                return local
             self.log_message.emit(f"[FILTER] {db_name}: connected; gathering option buckets.")
-            
-            # Special handling for Epoint data - load from parquet files
-            if db_name == 'sushi_epoint_pos_live':
-                self.log_message.emit("[FILTER] Processing Epoint data with special handling")
-                if conn:
-                    conn.close()
-                
-                # Load Epoint data from parquet files to get filter options
-                try:
-                    cache_paths = self.cache_paths.get('sushi_epoint_pos_live')
-                    if cache_paths is None:
-                        self.log_message.emit("[FILTER] Epoint cache path not configured")
-                        continue
-                    
-                    # Get current date range for filtering - use state dates if available
-                    if hasattr(state, 'date_from') and hasattr(state, 'date_to') and state.date_from and state.date_to:
-                        date_from = state.date_from
-                        date_to = state.date_to
-                    else:
-                        # Default to current month if no state dates
-                        now = datetime.now()
-                        date_from = now.replace(day=1).date()
-                        date_to = now.date()
-                    
-                    # Load Epoint data using the same method as the main data loading
-                    epoint_frames = self._load_brand_raw_frames('sushi_epoint_pos_live', date_from, date_to)
-                    
-                    if not epoint_frames.detail.empty:
-                        # Extract outlets from store_name column
-                        if 'store_name' in epoint_frames.detail.columns:
-                            outlets = epoint_frames.detail['store_name'].dropna().unique().tolist()
-                            aggregated["outlets"].update(outlets)
-                        
-                        # Extract categories
-                        if 'category' in epoint_frames.detail.columns:
-                            categories = epoint_frames.detail['category'].dropna().unique().tolist()
-                            aggregated["categories"].update(categories)
-                        
-                        # Extract products
-                        if 'item_name' in epoint_frames.detail.columns:
-                            products = epoint_frames.detail['item_name'].dropna().unique().tolist()
-                            aggregated["products"].update(products)
-                        
-                        # Extract discounts
-                        if 'disc_name' in epoint_frames.detail.columns:
-                            discounts = epoint_frames.detail['disc_name'].dropna().unique().tolist()
-                            aggregated["discounts"].update(discounts)
-                        
-                        # Extract payments from payment data
-                        if not epoint_frames.payments.empty and 'payment_name' in epoint_frames.payments.columns:
-                            payments = epoint_frames.payments['payment_name'].dropna().unique().tolist()
-                            aggregated["payments"].update(payments)
-                        
-                        self.log_message.emit(f"[FILTER] Epoint filter options loaded: {len(outlets)} outlets, {len(categories)} categories")
-                    else:
-                        self.log_message.emit("[FILTER] No Epoint data available for filter options")
-                        
-                except Exception as exc:
-                    self.log_message.emit(f"[FILTER] Error loading Epoint filter options: {exc}")
-                    continue
-
-            def _run_with_quarantine(query: str, parameters: Sequence[object]) -> Optional[List[tuple]]:
-                nonlocal conn
-                attempts = 0
-                while attempts < 2:
-                    try:
-                        return conn.execute(query, parameters).fetchall()
-                    except duckdb.Error as err:
-                        quarantined = storage_duckdb.quarantine_parquet_from_exception(err)
-                        if quarantined is None:
-                            self.log_message.emit(f"[FILTER] {db_name}: query failed ({err}).")
-                            return None
-                        self.log_message.emit(
-                            f"[FILTER] {db_name}: quarantined corrupted parquet '{quarantined.name}'; retrying."
-                        )
-                        self._repair_quarantined_parquet(db_name, quarantined)
-                        cached_conn = self._connections.pop(db_name, None)
-                        if cached_conn is not None:
-                            cached_conn.close()
-                        try:
-                            conn = self.duckdb_connection(db_name)
-                        except duckdb.Error as reopen_exc:
-                            self.log_message.emit(
-                                f"[FILTER] {db_name}: unable to reopen DuckDB after quarantine ({reopen_exc})."
-                            )
-                            return None
-                        attempts += 1
-                return None
-
-            # Load all filter options together in a single query for better performance
-            clauses, params = _build_sales_conditions()
-            where_sql = " AND ".join(clauses) if clauses else "1=1"
-            
-            consolidated_sql = """
-            SELECT 
-                DISTINCT 
-                CAST(s.store_name AS VARCHAR) AS outlet,
-                strftime('%Y-%m', s.c_date) AS month,
-                strftime('%Y-W%V', s.c_date) AS week,
-                CAST(im.category_code AS VARCHAR) AS category,
-                CAST(s.item_name AS VARCHAR) AS product,
-                CAST(s.disc_name AS VARCHAR) AS discount
-            FROM v_sales_clean s 
-            LEFT JOIN item_master im USING (item_name) 
-            WHERE s.store_name IS NOT NULL 
-            AND s.c_date IS NOT NULL
-            AND {where_sql}
-            """.format(where_sql=where_sql)
-            
             q_start = time.perf_counter()
-            rows = _run_with_quarantine(consolidated_sql, params)
-            if rows is None:
-                self.log_message.emit(
-                    f"[FILTER] {db_name}: consolidated query aborted after {time.perf_counter() - q_start:.2f}s."
-                )
-                continue
-            
-            # Process all results in a single pass
-            for outlet, month, week, category, product, discount in rows:
-                if outlet:
-                    aggregated["outlets"].add(str(outlet))
-                if month:
-                    aggregated["months"].add(str(month))
-                if week:
-                    aggregated["weeks"].add(str(week))
-                if category:
-                    aggregated["categories"].add(str(category))
-                if product:
-                    aggregated["products"].add(str(product))
-                if discount:
-                    aggregated["discounts"].add(str(discount))
-            
-            self.log_message.emit(
-                f"[FILTER] {db_name}: loaded {len(rows)} consolidated filter rows in {time.perf_counter() - q_start:.2f}s."
-            )
-
-            clauses, params = _build_sales_conditions(exclude="payments")
+            clauses, params = _build_sales_conditions(exclude=None)
             where_sql = " AND ".join(clauses) if clauses else "1=1"
-            payment_sql = (
-                "SELECT DISTINCT CAST(p.payment_name AS VARCHAR) AS value "
-                "FROM pos_sales_payment_dtls p "
-                "WHERE p.payment_name IS NOT NULL "
-                "AND EXISTS ("
-                "    SELECT 1 "
-                "    FROM v_sales_clean s "
-                "    LEFT JOIN item_master im USING (item_name) "
-                "    WHERE s.store_name = p.store_name "
-                "      AND s.sales_no = p.sales_no "
-                "      AND DATE(s.c_date) = DATE(p.c_date) "
-                f"      AND {where_sql}"
-                ")"
+            sql = (
+                "WITH s AS ("
+                "  SELECT s.*, COALESCE(CAST(im.category_code AS VARCHAR), '') AS category_code "
+                "  FROM v_sales_clean s "
+                "  LEFT JOIN item_master im USING (item_name) "
+                f"  WHERE {where_sql}"
+                "), uni AS ("
+                "  SELECT 'outlets' AS bucket, CAST(s.store_name AS VARCHAR) AS value FROM s WHERE s.store_name IS NOT NULL "
+                "  UNION ALL SELECT 'months', strftime('%Y-%m', s.c_date) FROM s WHERE s.c_date IS NOT NULL "
+                "  UNION ALL SELECT 'weeks', strftime('%Y-W%V', s.c_date) FROM s WHERE s.c_date IS NOT NULL "
+                "  UNION ALL SELECT 'categories', NULLIF(s.category_code, '') FROM s WHERE s.category_code IS NOT NULL AND s.category_code != '' "
+                "  UNION ALL SELECT 'discounts', CASE WHEN s.disc_name IS NULL OR TRIM(CAST(s.disc_name AS VARCHAR)) = '' THEN 'NO DISCOUNT' ELSE TRIM(CAST(s.disc_name AS VARCHAR)) END FROM s "
+                "  UNION ALL SELECT 'products', CAST(s.item_name AS VARCHAR) FROM s WHERE s.item_name IS NOT NULL "
+                "  UNION ALL SELECT 'payments', CAST(p.payment_name AS VARCHAR) FROM pos_sales_payment_dtls p "
+                "    WHERE p.payment_name IS NOT NULL "
+                "      AND EXISTS (SELECT 1 FROM s WHERE s.store_name = p.store_name AND s.sales_no = p.sales_no AND DATE(s.c_date) = DATE(p.c_date))"
+                ") SELECT bucket, value FROM uni WHERE value IS NOT NULL AND value != ''"
             )
-
-            rows = _run_with_quarantine(payment_sql, params)
-            if rows is None:
-                self.log_message.emit(
-                    f"[FILTER] {db_name}: payment query aborted after {time.perf_counter() - start_ts:.2f}s."
-                )
-                continue
-            aggregated["payments"].update(str(value) for (value,) in rows if value)
+            attempts = 0
+            while attempts < 2:
+                try:
+                    rows = conn.execute(sql, params).fetchall()
+                    break
+                except duckdb.Error as err:
+                    quarantined = storage_duckdb.quarantine_parquet_from_exception(err)
+                    if quarantined is None:
+                        self.log_message.emit(f"[FILTER] {db_name}: combined filter failed ({err}).")
+                        return local
+                    self.log_message.emit(
+                        f"[FILTER] {db_name}: quarantined corrupted parquet '{quarantined.name}'; retrying."
+                    )
+                    self._repair_quarantined_parquet(db_name, quarantined)
+                    cached_conn = self._connections.pop(db_name, None)
+                    if cached_conn is not None:
+                        try:
+                            cached_conn.close()
+                        except Exception:
+                            pass
+                    try:
+                        conn = self.duckdb_connection(db_name)
+                    except duckdb.Error as reopen_exc:
+                        self.log_message.emit(
+                            f"[FILTER] {db_name}: unable to reopen DuckDB after quarantine ({reopen_exc})."
+                        )
+                        return local
+                    attempts += 1
+            for bucket, value in rows:
+                key = str(bucket)
+                if key in local and value:
+                    local[key].add(str(value))
             self.log_message.emit(
-                f"[FILTER] {db_name}: payment query returned {len(rows)} rows. Total elapsed {time.perf_counter() - start_ts:.2f}s."
+                f"[FILTER] {db_name}: combined filter loaded in {time.perf_counter() - q_start:.2f}s."
             )
+            return local
+
+        worker_count = min(MAX_SYNC_WORKERS, len(targets))
+        if worker_count <= 1:
+            for db_name in targets:
+                local = _collect_buckets(db_name)
+                for k, s in local.items():
+                    aggregated[k].update(s)
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {executor.submit(_collect_buckets, db): db for db in targets}
+                for future in as_completed(futures):
+                    db_name = futures[future]
+                    try:
+                        local = future.result()
+                    except Exception as exc:
+                        self.log_message.emit(f"[FILTER] {db_name}: combined filter failed ({exc}).")
+                        continue
+                    for k, s in local.items():
+                        aggregated[k].update(s)
 
         self.log_message.emit(
             "[FILTER] Aggregated option sizes: "
@@ -2026,210 +1707,6 @@ class DataRepository(QtCore.QObject):
                 return False
         return True
 
-    def _load_epoint_brand_frames(self, date_from: Optional[date], date_to: Optional[date]) -> SalesRawFrames:
-        db_name = 'sushi_epoint_pos_live'
-        start_ts = time.perf_counter()
-
-        cache_paths = self.cache_paths.get(db_name)
-        if cache_paths is None:
-            self.log_message.emit("[EPOINT] Cache paths not configured; returning empty frames")
-            return SalesRawFrames(pd.DataFrame(), pd.DataFrame())
-
-        triplets = cache_paths.get_epoint_parquet_triplets()
-        if not triplets:
-            self.log_message.emit("[EPOINT] No Parquet triplets discovered under .pos_cache")
-            return SalesRawFrames(pd.DataFrame(), pd.DataFrame())
-
-        def _within_range(run_date: date) -> bool:
-            if date_from and run_date < date_from:
-                return False
-            if date_to and run_date > date_to:
-                return False
-            return True
-
-        selected_triplets = [triplet for triplet in triplets if _within_range(triplet[3])]
-        if not selected_triplets:
-            selected_triplets = triplets[-1:]
-            self.log_message.emit(
-                f"[EPOINT] Requested range not found; defaulting to latest dataset {selected_triplets[0][3]}"
-            )
-
-        detail_frames: List[pd.DataFrame] = []
-        payment_frames: List[pd.DataFrame] = []
-
-        for detail_path, payment_path, receipts_path, run_date in selected_triplets:
-            try:
-                detail_df = pd.read_parquet(detail_path)
-            except Exception as exc:
-                self.log_message.emit(f"[EPOINT] Failed reading detail parquet {detail_path.name}: {exc}")
-                continue
-
-            try:
-                payment_df = pd.read_parquet(payment_path)
-            except Exception as exc:
-                self.log_message.emit(f"[EPOINT] Failed reading payment parquet {payment_path.name}: {exc}")
-                continue
-
-            detail_df["run_date"] = pd.Timestamp(run_date)
-            payment_df["run_date"] = pd.Timestamp(run_date)
-
-            detail_frames.append(detail_df)
-            payment_frames.append(payment_df)
-
-        if not detail_frames:
-            self.log_message.emit("[EPOINT] No detail records loaded from selected Parquet triplets")
-            return SalesRawFrames(pd.DataFrame(), pd.DataFrame())
-
-        detail_df = pd.concat(detail_frames, ignore_index=True)
-        payment_df = pd.concat(payment_frames, ignore_index=True) if payment_frames else pd.DataFrame()
-
-        # Normalise detail dataframe
-        rename_map = {}
-        if "store_code3" in detail_df.columns:
-            rename_map["store_code3"] = "store_code_raw"
-        if "store_name" in detail_df.columns:
-            rename_map["store_name"] = "store_name_raw"
-        if "item_code" in detail_df.columns:
-            rename_map["item_code"] = "item_no"
-        if "amount" in detail_df.columns and "sub_total" not in detail_df.columns:
-            rename_map["amount"] = "sub_total"
-        detail_df = detail_df.rename(columns=rename_map)
-
-        detail_df["c_date"] = pd.to_datetime(detail_df.get("c_date"), errors="coerce")
-        detail_df = detail_df.dropna(subset=["c_date"])
-
-        if date_from:
-            detail_df = detail_df[detail_df["c_date"].dt.date >= date_from]
-        if date_to:
-            detail_df = detail_df[detail_df["c_date"].dt.date <= date_to]
-
-        if detail_df.empty:
-            self.log_message.emit("[EPOINT] Detail rows removed after date filtering")
-            return SalesRawFrames(pd.DataFrame(), pd.DataFrame())
-
-        # Ensure required columns exist
-        defaults: Dict[str, object] = {
-            "store_code_raw": "",
-            "store_name_raw": "",
-            "sales_no": "",
-            "item_no": "",
-            "item_name": "",
-            "qty": 0.0,
-            "sub_total": 0.0,
-            "category": "",
-            "disc_name": "",
-            "sales_category": "",
-            "brand": db_name,
-            "source_database": db_name,
-        }
-        for column, default_value in defaults.items():
-            if column not in detail_df.columns:
-                detail_df[column] = default_value
-
-        detail_df["store_code"] = detail_df["store_code_raw"].apply(_normalize_epoint_store_code)
-        store_name_source = detail_df.get("store_name_raw", detail_df.get("store_name", ""))
-        detail_df["store_name"] = [
-            _map_epoint_store_name(code, name)
-            for code, name in zip(detail_df["store_code_raw"], store_name_source)
-        ]
-
-        detail_df["brand"] = db_name
-        detail_df["source_database"] = db_name
-
-        detail_df["qty"] = pd.to_numeric(detail_df.get("qty"), errors="coerce").fillna(0.0)
-        detail_df["sub_total"] = pd.to_numeric(detail_df.get("sub_total"), errors="coerce").fillna(0.0)
-        detail_df["tax_amt"] = pd.to_numeric(detail_df.get("tax_amt", 0.0), errors="coerce").fillna(0.0)
-
-        # Derive net amount with GST logic
-        def _compute_net(row: pd.Series) -> float:
-            try:
-                base_amount = float(row.get("sub_total", 0.0))
-            except (TypeError, ValueError):
-                base_amount = 0.0
-            category_text = str(row.get("category", ""))
-            store_code_raw = str(row.get("store_code_raw", ""))
-            if store_code_raw.startswith("3"):
-                return base_amount / 1.09 if base_amount else 0.0
-            if "TAKE" in category_text.upper():
-                return base_amount / 1.09 if base_amount else 0.0
-            return base_amount
-
-        detail_df["net_amount"] = detail_df.apply(_compute_net, axis=1)
-
-        # Load stock master for sales category enrichment
-        stock_master_map: Dict[str, str] = {}
-        stock_master_path = Path("Stock master Total.xlsx")
-        if stock_master_path.exists():
-            try:
-                stock_df = pd.read_excel(stock_master_path, usecols=["STOCK", "AC_GROUP"])
-                stock_df = stock_df.dropna(subset=["STOCK"])
-                stock_df["STOCK"] = stock_df["STOCK"].astype(str).str.strip()
-                stock_df["AC_GROUP"] = stock_df["AC_GROUP"].astype(str).str.strip().str.upper()
-                stock_master_map = dict(zip(stock_df["STOCK"], stock_df["AC_GROUP"]))
-            except Exception as exc:  # pragma: no cover - defensive
-                self.log_message.emit(f"[EPOINT] Failed reading stock master: {exc}")
-
-        if stock_master_map:
-            detail_df["sales_category"] = detail_df["item_no"].astype(str).str.strip().map(stock_master_map).fillna(
-                detail_df.get("sales_category", "")
-            )
-
-        detail_df["take_away_item"] = detail_df["sales_category"].astype(str).str.upper().apply(
-            lambda value: "Y" if "TAKE" in value else "N"
-        )
-
-        # Normalise payments
-        payments_available = not payment_df.empty
-        if payments_available:
-            payment_rename = {}
-            if "store_code3" in payment_df.columns:
-                payment_rename["store_code3"] = "store_code_raw"
-            if "store_name" in payment_df.columns:
-                payment_rename["store_name"] = "store_name_raw"
-            if "tender_amt" in payment_df.columns and "tender_amount" not in payment_df.columns:
-                payment_rename["tender_amt"] = "tender_amount"
-            payment_df = payment_df.rename(columns=payment_rename)
-
-            payment_df["c_date"] = pd.to_datetime(payment_df.get("c_date"), errors="coerce")
-            payment_df = payment_df.dropna(subset=["c_date"])
-
-            if date_from:
-                payment_df = payment_df[payment_df["c_date"].dt.date >= date_from]
-            if date_to:
-                payment_df = payment_df[payment_df["c_date"].dt.date <= date_to]
-
-            # Align payments to available sales numbers
-            valid_sales = set(detail_df["sales_no"].astype(str))
-            if "sales_no" in payment_df.columns:
-                payment_df = payment_df[payment_df["sales_no"].astype(str).isin(valid_sales)]
-
-            payment_defaults: Dict[str, object] = {
-                "store_code_raw": "",
-                "store_name_raw": "",
-                "sales_no": "",
-                "payment_name": "",
-                "tender_amount": 0.0,
-            }
-            for column, default_value in payment_defaults.items():
-                if column not in payment_df.columns:
-                    payment_df[column] = default_value
-
-            payment_df["store_code"] = payment_df["store_code_raw"].apply(_normalize_epoint_store_code)
-            payment_df["store_name"] = [
-                _map_epoint_store_name(code, name)
-                for code, name in zip(payment_df["store_code_raw"], payment_df.get("store_name_raw", ""))
-            ]
-            payment_df["tender_amount"] = pd.to_numeric(payment_df["tender_amount"], errors="coerce").fillna(0.0)
-            payment_df["brand"] = db_name
-            payment_df["source_database"] = db_name
-
-        elapsed = time.perf_counter() - start_ts
-        self.log_message.emit(
-            f"[EPOINT] Loaded {len(detail_df):,} detail rows and {len(payment_df):,} payment rows in {elapsed:.2f}s"
-        )
-
-        return SalesRawFrames(detail_df.reset_index(drop=True), payment_df.reset_index(drop=True))
-
     def _load_brand_raw_frames(
         self,
         db_name: str,
@@ -2238,14 +1715,21 @@ class DataRepository(QtCore.QObject):
     ) -> SalesRawFrames:
         start_ts = time.perf_counter()
         
-        # Check if this is Epoint data
-        is_epoint = db_name == 'sushi_epoint_pos_live'
-        
-        if is_epoint:
-            return self._load_epoint_brand_frames(date_from, date_to)
-        
-        # Standard SQL for non-Epoint data
-        conn = storage_duckdb.open_conn(db_name)
+        try:
+            conn = storage_duckdb.open_conn(db_name)
+        except duckdb.Error as err:
+            quarantined = storage_duckdb.quarantine_parquet_from_exception(err)
+            if quarantined is not None:
+                self._repair_quarantined_parquet(db_name, quarantined)
+                cached = self._connections.pop(db_name, None)
+                if cached is not None:
+                    try:
+                        cached.close()
+                    except Exception:
+                        pass
+                conn = storage_duckdb.open_conn(db_name)
+            else:
+                raise
 
         conditions = ["1=1"]
         params: List[object] = []
@@ -2258,6 +1742,7 @@ class DataRepository(QtCore.QObject):
 
         where_clause = " AND ".join(conditions)
 
+        
         sales_sql = f"""
             WITH item_lookup AS (
                 SELECT item_name, MAX(category_code) AS category_code
@@ -2337,16 +1822,41 @@ class DataRepository(QtCore.QObject):
                  AND DATE(pay.c_date) = base.c_date
             """
 
-        try:
-            detail_df = conn.execute(sales_sql, params).df()
-            payment_df = conn.execute(payment_sql, params).df()
-        except duckdb.Error as exc:
-            raise RuntimeError(f"{db_name}: DuckDB query failed ({exc})") from exc
-        finally:
+        attempts = 0
+        detail_df = pd.DataFrame()
+        payment_df = pd.DataFrame()
+        while attempts < 2:
             try:
-                conn.close()
-            except Exception:
-                pass
+                detail_df = conn.execute(sales_sql, params).df()
+                payment_df = conn.execute(payment_sql, params).df()
+                break
+            except duckdb.Error as err:
+                quarantined = storage_duckdb.quarantine_parquet_from_exception(err)
+                if quarantined is None:
+                    self.log_message.emit(f"[FETCH] {db_name}: query failed ({err}).")
+                    break
+                self.log_message.emit(
+                    f"[FETCH] {db_name}: quarantined corrupted parquet '{quarantined.name}'; repairing and retrying."
+                )
+                self._repair_quarantined_parquet(db_name, quarantined)
+                cached_conn = self._connections.pop(db_name, None)
+                if cached_conn is not None:
+                    try:
+                        cached_conn.close()
+                    except Exception:
+                        pass
+                try:
+                    conn = self.duckdb_connection(db_name)
+                except duckdb.Error as reopen_exc:
+                    self.log_message.emit(
+                        f"[FETCH] {db_name}: unable to reopen DuckDB after quarantine ({reopen_exc})."
+                    )
+                    break
+                attempts += 1
+        try:
+            conn.close()
+        except Exception:
+            pass
 
         elapsed = time.perf_counter() - start_ts
         self.log_message.emit(
@@ -2378,179 +1888,72 @@ class DataRepository(QtCore.QObject):
         payment_frame: pd.DataFrame,
         state: FilterState,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Apply in-memory filters to detail and payment dataframes.
-        
-        Handles both SQL and Epoint data by normalizing column names and values.
-        """
-        if detail_frame.empty and payment_frame.empty:
+        if detail_frame.empty or payment_frame.empty:
             return detail_frame, payment_frame
-
-        # Make copies to avoid SettingWithCopyWarning
-        detail = detail_frame.copy()
-        payment = payment_frame.copy()
-
-        # Ensure date is datetime
-        if "c_date" in detail.columns and not pd.api.types.is_datetime64_any_dtype(detail["c_date"]):
-            detail["c_date"] = pd.to_datetime(detail["c_date"], errors="coerce")
-
-        # Drop rows with invalid dates before applying filters
-        if "c_date" in detail.columns:
-            detail = detail.dropna(subset=["c_date"])
-
-        # Apply date filter
-        if state.date_from and "c_date" in detail.columns:
-            detail = detail[detail["c_date"] >= pd.to_datetime(state.date_from)]
-        if state.date_to and "c_date" in detail.columns:
-            detail = detail[detail["c_date"] <= pd.to_datetime(state.date_to)]
-
-        if detail.empty:
-            return detail.reset_index(drop=True), payment.iloc[0:0].reset_index(drop=True)
-
-        # Normalise brand selections for case-insensitive comparison
-        brands_upper = {b.upper() for b in state.brands} if state.brands else None
-
-        # Apply brand filter - handle both 'brand', 'source_database' and 'store_code3'
-        if brands_upper:
-            if "brand" in detail.columns:
-                detail = detail[detail["brand"].astype(str).str.upper().isin(brands_upper)]
-            elif "source_database" in detail.columns:
-                detail = detail[detail["source_database"].astype(str).str.upper().isin(brands_upper)]
-            elif "store_code3" in detail.columns:
-                def _map_store_to_brand(store_code):
-                    if pd.isna(store_code):
-                        return "SE"
-                    store_str = str(store_code).strip()
-                    if not store_str:
-                        return "SE"
-                    if store_str.startswith("3"):
-                        return "GOGO"
-                    if store_str.startswith("4"):
-                        return "PLUS"
-                    return "SE"
-
-                detail["_brand"] = detail["store_code3"].apply(_map_store_to_brand)
-                detail = detail[detail["_brand"].str.upper().isin(brands_upper)]
-                detail = detail.drop(columns=["_brand"])
-
-        if detail.empty:
-            return detail.reset_index(drop=True), payment.iloc[0:0].reset_index(drop=True)
-
-        # Apply store filter - handle both store codes and store names
+        conn = duckdb.connect()
+        conn.register("d", detail_frame)
+        conn.register("p", payment_frame)
+        clauses: List[str] = ["1=1"]
+        params: List[object] = []
+        if state.date_from:
+            clauses.append("DATE(d.c_date) >= ?")
+            params.append(state.date_from)
+        if state.date_to:
+            clauses.append("DATE(d.c_date) <= ?")
+            params.append(state.date_to)
+        if state.brands:
+            placeholders = ",".join("?" for _ in state.brands)
+            clauses.append(f"CAST(d.source_database AS VARCHAR) IN ({placeholders})")
+            params.extend(state.brands)
         if state.outlets:
-            outlets_upper = {o.upper() for o in state.outlets}
-            if "store_name" in detail.columns:
-                detail = detail[detail["store_name"].astype(str).str.upper().isin(outlets_upper)]
-            elif "store_code3" in detail.columns:
-                outlet_codes = {
-                    str(outlet).split(" - ")[0].split(" ")[0].strip()
-                    for outlet in state.outlets
-                }
-                detail = detail[detail["store_code3"].astype(str).str.strip().isin(outlet_codes)]
-
-        if detail.empty:
-            return detail.reset_index(drop=True), payment.iloc[0:0].reset_index(drop=True)
-
-        # Apply weekday filter
-        if state.weekdays and "c_date" in detail.columns:
-            detail = detail[detail["c_date"].dt.weekday.isin(state.weekdays)]
-
-        if detail.empty:
-            return detail.reset_index(drop=True), payment.iloc[0:0].reset_index(drop=True)
-
-        # Apply payment filter
-        if state.payments and "payment_name" in payment.columns:
-            payments_upper = {p.upper() for p in state.payments}
-            payment = payment[payment["payment_name"].fillna("").str.upper().isin(payments_upper)]
-            if "sales_no" in detail.columns and "sales_no" in payment.columns:
-                detail = detail[detail["sales_no"].isin(payment["sales_no"])].copy()
-
-        if detail.empty:
-            return detail.reset_index(drop=True), payment.iloc[0:0].reset_index(drop=True)
-
-        # Apply product filter
-        if state.products and "item_name" in detail.columns:
-            products_upper = {p.upper() for p in state.products}
-            detail = detail[detail["item_name"].fillna("").str.upper().isin(products_upper)]
-
-        if detail.empty:
-            return detail.reset_index(drop=True), payment.iloc[0:0].reset_index(drop=True)
-
-        # Apply category filter
-        if state.categories and "category_name" in detail.columns:
-            categories_upper = {c.upper() for c in state.categories}
-            detail = detail[detail["category_name"].fillna("").str.upper().isin(categories_upper)]
-
-        if detail.empty:
-            return detail.reset_index(drop=True), payment.iloc[0:0].reset_index(drop=True)
-
-        # Apply discount filter
-        if state.discounts and "discount_name" in detail.columns:
-            discounts_upper = {d.upper() for d in state.discounts}
-            detail = detail[detail["discount_name"].fillna("").str.upper().isin(discounts_upper)]
-
-        if detail.empty:
-            return detail.reset_index(drop=True), payment.iloc[0:0].reset_index(drop=True)
-
-        # Filter payments to only include sales that match the filtered details
-        if "sales_no" in detail.columns and "sales_no" in payment.columns:
-            payment = payment[payment["sales_no"].isin(detail["sales_no"])].copy()
-        else:
-            payment = payment.iloc[0:0]
-
-        return detail.reset_index(drop=True), payment.reset_index(drop=True)
-
-    def _calculate_net_sales_with_service_charge(self, details: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calculate nett sales by:
-        1. Distributing service charges among dine-in items in the same bill
-        2. Removing GST from non-dine-in items (dividing by 1.09)
-        """
-        if details.empty:
-            return details
-        
-        # Make a copy to avoid SettingWithCopyWarning
-        df = details.copy()
-        
-        # Initialize net_amount column with sub_total as default
-        df['net_amount'] = df['sub_total']
-        
-        # Get service charge amounts per receipt
-        service_charges = df[df['item_name'].str.contains('SERVICE CHARGE', na=False)].groupby('sales_no')['sub_total'].sum()
-        
-        # Get GST amounts per receipt  
-        gst_amounts = df[df['item_name'].str.contains('GST', na=False)].groupby('sales_no')['sub_total'].sum()
-        
-        # Process service charge distribution for dine-in items
-        for receipt_no, svc_charge in service_charges.items():
-            if svc_charge > 0:
-                # Get dine-in items for this receipt (excluding service charge and GST rows)
-                dine_in_mask = (
-                    (df['sales_no'] == receipt_no) & 
-                    (~df['item_name'].str.contains('SERVICE CHARGE|GST', na=False)) &
-                    (df['take_away_item'] != 'Y')  # Dine-in items are not takeaway
-                )
-                dine_in_items = df[dine_in_mask]
-                
-                if not dine_in_items.empty:
-                    total_dine_in_amount = dine_in_items['sub_total'].sum()
-                    if total_dine_in_amount > 0:
-                        # Calculate proportion and allocate service charge
-                        proportions = dine_in_items['sub_total'] / total_dine_in_amount
-                        allocated_svc = svc_charge * proportions
-                        df.loc[dine_in_items.index, 'net_amount'] = dine_in_items['sub_total'] + allocated_svc
-        
-        # Remove GST from non-dine-in items (takeaway items)
-        non_dine_in_mask = (
-            (~df['item_name'].str.contains('SERVICE CHARGE|GST', na=False)) &
-            (df['take_away_item'] == 'Y')  # Takeaway items
-        )
-        df.loc[non_dine_in_mask, 'net_amount'] = df.loc[non_dine_in_mask, 'sub_total'] / 1.09
-        
-        # Set net_amount for service charge and GST rows to 0 (they're already distributed)
-        svc_gst_mask = df['item_name'].str.contains('SERVICE CHARGE|GST', na=False)
-        df.loc[svc_gst_mask, 'net_amount'] = 0.0
-        
-        return df
+            placeholders = ",".join("?" for _ in state.outlets)
+            clauses.append(f"CAST(d.store_name AS VARCHAR) IN ({placeholders})")
+            params.extend(state.outlets)
+        if state.products:
+            placeholders = ",".join("?" for _ in state.products)
+            clauses.append(f"CAST(d.item_name AS VARCHAR) IN ({placeholders})")
+            params.extend(state.products)
+        if state.categories:
+            placeholders = ",".join("?" for _ in state.categories)
+            clauses.append(f"CAST(d.category_code AS VARCHAR) IN ({placeholders})")
+            params.extend(state.categories)
+        if state.discounts:
+            placeholders = ",".join("?" for _ in state.discounts)
+            clauses.append(f"CAST(d.disc_name AS VARCHAR) IN ({placeholders})")
+            params.extend(state.discounts)
+        if state.weekdays:
+            placeholders = ",".join("?" for _ in state.weekdays)
+            clauses.append(f"extract('dow' FROM d.c_date) IN ({placeholders})")
+            params.extend(state.weekdays)
+        where_sql = " AND ".join(clauses)
+        filtered_detail = conn.execute(
+            "SELECT * FROM d WHERE " + where_sql,
+            params,
+        ).fetchdf()
+        pay_clauses: List[str] = ["1=1"]
+        pay_params: List[object] = []
+        if state.date_from:
+            pay_clauses.append("DATE(p.c_date) >= ?")
+            pay_params.append(state.date_from)
+        if state.date_to:
+            pay_clauses.append("DATE(p.c_date) <= ?")
+            pay_params.append(state.date_to)
+        if state.payments:
+            placeholders = ",".join("?" for _ in state.payments)
+            pay_clauses.append(f"CAST(p.payment_name AS VARCHAR) IN ({placeholders})")
+            pay_params.extend(state.payments)
+        pay_where = " AND ".join(pay_clauses)
+        # semi-join to distinct receipt keys to avoid payment row explosion
+        conn.register("_fd", filtered_detail)
+        filtered_payment = conn.execute(
+            "WITH keys AS (SELECT DISTINCT CAST(store_name AS VARCHAR) AS store_name, CAST(sales_no AS VARCHAR) AS sales_no, DATE(c_date) AS c_date FROM _fd) "
+            "SELECT DISTINCT p.* FROM p JOIN keys k "
+            "ON k.store_name = p.store_name AND k.sales_no = p.sales_no AND k.c_date = DATE(p.c_date) "
+            f"WHERE {pay_where}",
+            pay_params,
+        ).fetchdf()
+        conn.close()
+        return filtered_detail.reset_index(drop=True), filtered_payment.reset_index(drop=True)
 
     def fetch_sales_transactions(self, state: FilterState) -> SalesReportFrames:
         targets: List[str] = []
@@ -2622,10 +2025,31 @@ class DataRepository(QtCore.QObject):
                 empty_promotion,
             )
 
-        combined_detail = pd.concat(raw_detail_frames, ignore_index=True)
-        combined_payments = (
-            pd.concat(raw_payment_frames, ignore_index=True) if raw_payment_frames else pd.DataFrame()
-        )
+        if raw_detail_frames:
+            _conn_union = duckdb.connect()
+            _aliases_d: List[str] = []
+            for i, df in enumerate(raw_detail_frames):
+                alias = f"d{i}"
+                _conn_union.register(alias, df)
+                _aliases_d.append(alias)
+            _sql_d = " UNION ALL ".join(f"SELECT * FROM {a}" for a in _aliases_d)
+            combined_detail = _conn_union.execute(_sql_d).fetchdf()
+            _conn_union.close()
+        else:
+            combined_detail = pd.DataFrame()
+
+        if raw_payment_frames:
+            _conn_union_p = duckdb.connect()
+            _aliases_p: List[str] = []
+            for i, df in enumerate(raw_payment_frames):
+                alias = f"p{i}"
+                _conn_union_p.register(alias, df)
+                _aliases_p.append(alias)
+            _sql_p = " UNION ALL ".join(f"SELECT * FROM {a}" for a in _aliases_p)
+            combined_payments = _conn_union_p.execute(_sql_p).fetchdf()
+            _conn_union_p.close()
+        else:
+            combined_payments = pd.DataFrame()
 
         base_state = FilterState(
             date_from=state.date_from,
@@ -2641,6 +2065,10 @@ class DataRepository(QtCore.QObject):
         self.log_message.emit(
             f"[FILTER] Applied in-memory filters: details {len(filtered_detail):,} rows, payments {len(filtered_payments):,} rows in {filter_elapsed:.2f}s"
         )
+        try:
+            self._log_filter_diagnostics(base_detail, base_payments, state, filtered_detail, filtered_payments)
+        except Exception:
+            pass
 
         if filtered_detail.empty or filtered_payments.empty:
             empty_payment = {mode: pd.DataFrame(columns=self._payment_columns_for_mode(mode)) for mode in PERIOD_OPTIONS}
@@ -2672,6 +2100,108 @@ class DataRepository(QtCore.QObject):
         )
         return result
 
+    def _log_filter_diagnostics(
+        self,
+        base_detail: pd.DataFrame,
+        base_payments: pd.DataFrame,
+        state: FilterState,
+        filtered_detail: pd.DataFrame,
+        filtered_payments: pd.DataFrame,
+    ) -> None:
+        conn = duckdb.connect(database=":memory:")
+        conn.register("d", base_detail)
+        conn.register("p", base_payments)
+        clauses: List[str] = []
+        params: List[object] = []
+        if state.date_from:
+            clauses.append("DATE(d.c_date) >= ?")
+            params.append(state.date_from)
+        if state.date_to:
+            clauses.append("DATE(d.c_date) <= ?")
+            params.append(state.date_to)
+        date_where = " AND ".join(clauses) if clauses else "1=1"
+        brands_where = "1=1"
+        outlets_where = "1=1"
+        products_where = "1=1"
+        categories_where = "1=1"
+        discounts_where = "1=1"
+        weekdays_where = "1=1"
+        br_params: List[object] = []
+        if state.brands:
+            placeholders = ",".join("?" for _ in state.brands)
+            brands_where = f"CAST(d.source_database AS VARCHAR) IN ({placeholders})"
+            br_params.extend(state.brands)
+        ol_params: List[object] = []
+        if state.outlets:
+            placeholders = ",".join("?" for _ in state.outlets)
+            outlets_where = f"CAST(d.store_name AS VARCHAR) IN ({placeholders})"
+            ol_params.extend(state.outlets)
+        pr_params: List[object] = []
+        if state.products:
+            placeholders = ",".join("?" for _ in state.products)
+            products_where = f"CAST(d.item_name AS VARCHAR) IN ({placeholders})"
+            pr_params.extend(state.products)
+        ct_params: List[object] = []
+        if state.categories:
+            placeholders = ",".join("?" for _ in state.categories)
+            categories_where = f"CAST(d.category_code AS VARCHAR) IN ({placeholders})"
+            ct_params.extend(state.categories)
+        dc_params: List[object] = []
+        if state.discounts:
+            placeholders = ",".join("?" for _ in state.discounts)
+            discounts_where = f"CAST(d.disc_name AS VARCHAR) IN ({placeholders})"
+            dc_params.extend(state.discounts)
+        wd_params: List[object] = []
+        if state.weekdays:
+            placeholders = ",".join("?" for _ in state.weekdays)
+            weekdays_where = f"extract('dow' FROM d.c_date) IN ({placeholders})"
+            wd_params.extend(state.weekdays)
+        total_detail = len(base_detail.index)
+        total_payment = len(base_payments.index)
+        date_cnt = conn.execute(f"SELECT COUNT(*) FROM d WHERE {date_where}", params).fetchone()[0]
+        brand_cnt = conn.execute(
+            f"SELECT COUNT(*) FROM d WHERE {date_where} AND {brands_where}",
+            [*params, *br_params],
+        ).fetchone()[0]
+        outlet_cnt = conn.execute(
+            f"SELECT COUNT(*) FROM d WHERE {date_where} AND {brands_where} AND {outlets_where}",
+            [*params, *br_params, *ol_params],
+        ).fetchone()[0]
+        product_cnt = conn.execute(
+            f"SELECT COUNT(*) FROM d WHERE {date_where} AND {brands_where} AND {outlets_where} AND {products_where}",
+            [*params, *br_params, *ol_params, *pr_params],
+        ).fetchone()[0]
+        category_cnt = conn.execute(
+            f"SELECT COUNT(*) FROM d WHERE {date_where} AND {brands_where} AND {outlets_where} AND {products_where} AND {categories_where}",
+            [*params, *br_params, *ol_params, *pr_params, *ct_params],
+        ).fetchone()[0]
+        discount_cnt = conn.execute(
+            f"SELECT COUNT(*) FROM d WHERE {date_where} AND {brands_where} AND {outlets_where} AND {products_where} AND {categories_where} AND {discounts_where}",
+            [*params, *br_params, *ol_params, *pr_params, *ct_params, *dc_params],
+        ).fetchone()[0]
+        weekday_cnt = conn.execute(
+            f"SELECT COUNT(*) FROM d WHERE {date_where} AND {brands_where} AND {outlets_where} AND {products_where} AND {categories_where} AND {discounts_where} AND {weekdays_where}",
+            [*params, *br_params, *ol_params, *pr_params, *ct_params, *dc_params, *wd_params],
+        ).fetchone()[0]
+        pay_date_cnt = conn.execute(
+            f"SELECT COUNT(*) FROM p WHERE {date_where.replace('d.', 'p.')}",
+            params,
+        ).fetchone()[0]
+        pay_name_cnt = pay_date_cnt
+        if state.payments:
+            placeholders = ",".join("?" for _ in state.payments)
+            pay_name_cnt = conn.execute(
+                f"SELECT COUNT(*) FROM p WHERE {date_where.replace('d.', 'p.')} AND CAST(p.payment_name AS VARCHAR) IN ({placeholders})",
+                [*params, *state.payments],
+            ).fetchone()[0]
+        conn.close()
+        self.log_message.emit(
+            f"[DIAG] Details total={total_detail:,} -> date={date_cnt:,} -> brand={brand_cnt:,} -> outlet={outlet_cnt:,} -> product={product_cnt:,} -> category={category_cnt:,} -> discount={discount_cnt:,} -> weekday={weekday_cnt:,}. Final={len(filtered_detail):,}"
+        )
+        self.log_message.emit(
+            f"[DIAG] Payments total={total_payment:,} -> date={pay_date_cnt:,} -> payment_name={pay_name_cnt:,}. Final={len(filtered_payments):,}"
+        )
+
     def _assemble_sales_report(
         self,
         detail_frame: pd.DataFrame,
@@ -2685,21 +2215,16 @@ class DataRepository(QtCore.QObject):
         detail_frame = detail_frame.reset_index(drop=True).copy()
         payments_frame = payments_frame.reset_index(drop=True).copy()
 
-        # Apply nett sales calculation with service charge distribution
-        detail_frame = self._calculate_net_sales_with_service_charge(detail_frame)
+        sub_total = pd.to_numeric(detail_frame.get("sub_total"), errors="coerce").fillna(0.0)
+        disc_amt = pd.to_numeric(detail_frame.get("disc_amt"), errors="coerce").fillna(0.0)
+        pro_disc_amt = pd.to_numeric(detail_frame.get("pro_disc_amt"), errors="coerce").fillna(0.0)
+        tax_amt = pd.to_numeric(detail_frame.get("tax_amt"), errors="coerce").fillna(0.0)
+        svc_amt = pd.to_numeric(detail_frame.get("svc_amt"), errors="coerce").fillna(0.0)
 
-        sub_total = pd.to_numeric(detail_frame.get("sub_total"), errors="coerce")
-        sub_total = sub_total.fillna(0.0) if hasattr(sub_total, 'fillna') else 0.0
-        disc_amt = pd.to_numeric(detail_frame.get("disc_amt"), errors="coerce")
-        disc_amt = disc_amt.fillna(0.0) if hasattr(disc_amt, 'fillna') else 0.0
-        pro_disc_amt = pd.to_numeric(detail_frame.get("pro_disc_amt"), errors="coerce")
-        pro_disc_amt = pro_disc_amt.fillna(0.0) if hasattr(pro_disc_amt, 'fillna') else 0.0
-        tax_amt = pd.to_numeric(detail_frame.get("tax_amt"), errors="coerce")
-        tax_amt = tax_amt.fillna(0.0) if hasattr(tax_amt, 'fillna') else 0.0
-        svc_amt = pd.to_numeric(detail_frame.get("svc_amt"), errors="coerce")
-        svc_amt = svc_amt.fillna(0.0) if hasattr(svc_amt, 'fillna') else 0.0
-
-        source_db = detail_frame.get("source_database")
+        if "source_database" in detail_frame:
+            source_db = detail_frame["source_database"].astype(str)
+        else:
+            source_db = pd.Series("", index=detail_frame.index, dtype="object")
 
         if "take_away_item" in detail_frame:
             takeaway_flag = detail_frame["take_away_item"].astype(str).str.upper()
@@ -2707,14 +2232,13 @@ class DataRepository(QtCore.QObject):
             takeaway_flag = pd.Series("", index=detail_frame.index, dtype="object")
 
         if "net_amount" in detail_frame.columns:
-            net_amount_series = pd.to_numeric(detail_frame.get("net_amount"), errors="coerce")
-            net_amount_series = net_amount_series.fillna(0.0) if hasattr(net_amount_series, 'fillna') else 0.0
+            net_amount_series = pd.to_numeric(detail_frame.get("net_amount"), errors="coerce").fillna(0.0)
             detail_frame["net_item"] = net_amount_series
         else:
             express_mask = source_db.eq("sushi_express_pos_live")
             takeaway_mask = takeaway_flag.eq("Y")
             tax_deduction = np.where(express_mask & ~takeaway_mask, 0.0, tax_amt)
-            detail_frame["net_item"] = sub_total - disc_amt - pro_disc_amt - tax_deduction + svc_amt
+            detail_frame["net_item"] = sub_total - pro_disc_amt - tax_deduction + svc_amt
 
         receipt_totals = (
             detail_frame.groupby(["c_date", "store_name", "sales_no"], as_index=False)
@@ -2771,24 +2295,155 @@ class DataRepository(QtCore.QObject):
             payment_analysis = {mode: pd.DataFrame(columns=self._payment_columns_for_mode(mode)) for mode in PERIOD_OPTIONS}
         else:
             base_summary = self._build_payment_summary(payment_receipt, receipt_totals, store_brand_map)
+            if base_summary is None or getattr(base_summary, "empty", True):
+                simple = payment_receipt.copy()
+                simple["Date"] = pd.to_datetime(simple["c_date"], errors="coerce")
+                simple["YearMonth"] = simple["Date"].dt.to_period("M").astype(str)
+                simple["WeekLabel"] = simple["Date"].dt.strftime("%Y-W%V")
+                simple["tender"] = pd.to_numeric(simple.get("tender_amount"), errors="coerce").fillna(0.0)
+                brand_lookup2 = store_brand_map.drop_duplicates(subset=["store_name"])  # store_name, BrandGroup
+                simple = simple.merge(brand_lookup2, on=["store_name"], how="left")
+                # attach gogo_net per receipt for GOGO allocation
+                keys = ["Date", "YearMonth", "WeekLabel", "store_name", "sales_no"]
+                dfd2 = detail_frame.copy()
+                dfd2["Date"] = pd.to_datetime(dfd2["c_date"], errors="coerce")
+                dfd2["YearMonth"] = dfd2["Date"].dt.to_period("M").astype(str)
+                dfd2["WeekLabel"] = dfd2["Date"].dt.strftime("%Y-W%V")
+                gogo_net2 = (
+                    pd.to_numeric(dfd2.get("sub_total"), errors="coerce").fillna(0.0)
+                    - pd.to_numeric(dfd2.get("pro_disc_amt"), errors="coerce").fillna(0.0)
+                )
+                dfd2 = dfd2.assign(gogo_net=gogo_net2)
+                gogo_receipts2 = (
+                    dfd2.groupby(keys, as_index=False)["gogo_net"].sum()
+                )
+                simple = simple.merge(gogo_receipts2, on=keys, how="left")
+                simple["gogo_net"] = pd.to_numeric(simple.get("gogo_net"), errors="coerce").fillna(0.0)
+                simple["is_cash"] = simple["payment_name"].astype(str).str.upper().str.contains("CASH", na=False)
+                simple["is_gogo"] = simple["BrandGroup"].astype(str).eq("GOGO")
+                simple["noncash_flag"] = (~simple["is_cash"]).astype(int)
+                noncash_count = simple.groupby(keys)["noncash_flag"].transform("sum").fillna(0)
+
+                # attach receipt net to each payment line to compute per-payment bill baseline
+                rt_keys = ["Date", "YearMonth", "WeekLabel", "store_name", "sales_no"]
+                rt = receipt_totals.copy()
+                rt["Date"] = pd.to_datetime(rt["c_date"], errors="coerce")
+                rt["YearMonth"] = rt["Date"].dt.to_period("M").astype(str)
+                rt["WeekLabel"] = rt["Date"].dt.strftime("%Y-W%V")
+                rt_attach = rt[rt_keys + ["net_total"]].rename(columns={"net_total": "bill_total"})
+                simple = simple.merge(rt_attach, on=rt_keys, how="left")
+                if "bill_total" not in simple.columns:
+                    simple["bill_total"] = 0.0
+                cap = np.where(simple["is_gogo"], simple["gogo_net"], simple["bill_total"].fillna(0.0))
+                # equal split across non-cash; cash gets full cap only when no non-cash present
+                simple["allocated_sales"] = np.where(
+                    ~simple["is_cash"] & (noncash_count > 0),
+                    cap / noncash_count,
+                    np.where(simple["is_cash"] & (noncash_count == 0), cap, 0.0),
+                )
+                grouped = (
+                    simple.groupby(["Date", "WeekLabel", "YearMonth", "store_name", "payment_name"], as_index=False)
+                    .agg(payment_sales=("allocated_sales", "sum"), receipts=("sales_no", "nunique"), bill_sales=("bill_total", "sum"))
+                )
+
+                outlet_payment_totals = (
+                    grouped.groupby(["Date", "WeekLabel", "YearMonth", "store_name"], as_index=False)["payment_sales"].sum()
+                    .rename(columns={"payment_sales": "outlet_payment_sales"})
+                )
+
+                outlet_rollups = (
+                    rt.groupby(["Date", "WeekLabel", "YearMonth", "store_name"], as_index=False)
+                    .agg(outlet_bill_sales=("net_total", "sum"), outlet_receipts=("sales_no", "nunique"))
+                )
+
+                # GOGO 專用：不含稅與服務費的票據金額作為基準
+                dfd = detail_frame.copy()
+                dfd["Date"] = pd.to_datetime(dfd["c_date"], errors="coerce")
+                dfd["YearMonth"] = dfd["Date"].dt.to_period("M").astype(str)
+                dfd["WeekLabel"] = dfd["Date"].dt.strftime("%Y-W%V")
+                gogo_item_net = (
+                    pd.to_numeric(dfd.get("sub_total"), errors="coerce").fillna(0.0)
+                    - pd.to_numeric(dfd.get("pro_disc_amt"), errors="coerce").fillna(0.0)
+                )
+                gogo_receipts = (
+                    dfd.assign(gogo_net=gogo_item_net)
+                    .groupby(["Date", "YearMonth", "WeekLabel", "store_name", "sales_no"], as_index=False)["gogo_net"].sum()
+                )
+                outlet_gogo_bill = (
+                    gogo_receipts.groupby(["Date", "WeekLabel", "YearMonth", "store_name"], as_index=False)["gogo_net"].sum()
+                    .rename(columns={"gogo_net": "outlet_bill_sales_gogo"})
+                )
+                brand_lookup = store_brand_map.drop_duplicates(subset=["store_name"])  # store_name, BrandGroup
+
+                joined = grouped.merge(outlet_rollups, on=["Date", "WeekLabel", "YearMonth", "store_name"], how="left")
+                joined = joined.merge(outlet_payment_totals, on=["Date", "WeekLabel", "YearMonth", "store_name"], how="left")
+                joined = joined.merge(brand_lookup, on=["store_name"], how="left")
+                joined = joined.merge(outlet_gogo_bill, on=["Date", "WeekLabel", "YearMonth", "store_name"], how="left")
+                # keep bill_sales as per-payment sum of receipt bill totals; do not override with outlet totals
+                joined["Sales Ratio %"] = np.where(
+                    joined["outlet_payment_sales"].gt(0),
+                    (joined["payment_sales"] / joined["outlet_payment_sales"]) * 100.0,
+                    0.0,
+                )
+                joined["TC Ratio %"] = np.where(
+                    joined["outlet_receipts"].gt(0),
+                    (joined["receipts"] / joined["outlet_receipts"]) * 100.0,
+                    0.0,
+                )
+                joined["IsTotal"] = 0
+
+                totals_rows = outlet_rollups.merge(outlet_payment_totals, on=["Date", "WeekLabel", "YearMonth", "store_name"], how="left")
+                totals_rows = totals_rows.merge(brand_lookup, on=["store_name"], how="left")
+                totals_rows = totals_rows.merge(outlet_gogo_bill, on=["Date", "WeekLabel", "YearMonth", "store_name"], how="left")
+                totals_rows["payment_name"] = "TOTAL"
+                totals_rows.rename(
+                    columns={
+                        "outlet_payment_sales": "payment_sales",
+                        "outlet_bill_sales": "bill_sales_sql",
+                        "outlet_receipts": "receipts",
+                    },
+                    inplace=True,
+                )
+                totals_rows["bill_sales"] = np.where(
+                    totals_rows["BrandGroup"].astype(str).eq("GOGO"),
+                    totals_rows["outlet_bill_sales_gogo"].fillna(0.0),
+                    totals_rows["bill_sales_sql"].fillna(0.0),
+                )
+                totals_rows["Sales Ratio %"] = 100.0
+                totals_rows["TC Ratio %"] = 100.0
+                totals_rows["IsTotal"] = 1
+
+                base_summary = pd.concat([joined[[
+                    "Date", "WeekLabel", "YearMonth", "store_name", "payment_name", "payment_sales", "receipts", "bill_sales", "Sales Ratio %", "TC Ratio %", "IsTotal"
+                ]], totals_rows[[
+                    "Date", "WeekLabel", "YearMonth", "store_name", "payment_name", "payment_sales", "receipts", "bill_sales", "Sales Ratio %", "TC Ratio %", "IsTotal"
+                ]]], ignore_index=True, sort=False)
             payment_analysis = {
                 mode: self._format_payment_period(base_summary, mode)
                 for mode in PERIOD_OPTIONS
             }
 
         discount_frame_source = detail_frame.drop(columns=["net_item"], errors="ignore").copy()
-        discount_summary = self._build_discount_summary(discount_frame_source, store_brand_map, receipt_totals)
+        try:
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                fut_discount = executor.submit(self._build_discount_summary, discount_frame_source, store_brand_map, receipt_totals)
+                fut_promotion = executor.submit(self._build_promotion_analysis, detail_frame.copy(), store_brand_map.copy(), state)
+                fut_product = executor.submit(self._build_product_analysis, detail_frame.copy(), payments_frame.copy(), receipt_totals.copy(), store_brand_map.copy())
+                discount_summary = fut_discount.result()
+                promotion_analysis = fut_promotion.result()
+                product_analysis = fut_product.result()
+        except Exception:
+            discount_summary = self._build_discount_summary(discount_frame_source, store_brand_map, receipt_totals)
+            promotion_analysis = self._build_promotion_analysis(detail_frame, store_brand_map, state)
+            product_analysis = self._build_product_analysis(detail_frame, payments_frame, receipt_totals, store_brand_map)
+
         discount_analysis = {
             mode: self._format_discount_period(discount_summary, mode)
             for mode in PERIOD_OPTIONS
         }
 
-        promotion_analysis = self._build_promotion_analysis(detail_frame, store_brand_map, state)
-
         if "net_item" in detail_frame.columns:
             detail_frame.drop(columns=["net_item"], inplace=True)
-
-        product_analysis = self._build_product_analysis(detail_frame, payments_frame, receipt_totals, store_brand_map)
 
         return SalesReportFrames(
             detail_frame,
@@ -2832,86 +2487,29 @@ class DataRepository(QtCore.QObject):
             .rename(columns={"net_total": "ReceiptNet"})
         )
         frame = frame.merge(receipt_lookup, on=["c_date", "store_name", "sales_no"], how="left")
-        receipt_net = pd.to_numeric(frame.get("ReceiptNet"), errors="coerce")
-        frame["ReceiptNet"] = receipt_net.fillna(0.0) if hasattr(receipt_net, 'fillna') else 0.0
+        frame["ReceiptNet"] = pd.to_numeric(frame.get("ReceiptNet"), errors="coerce").fillna(0.0)
 
-        # Handle wastage receipts using is_wastage column from parquet files
-        # For Epoint data, wastage is identified by is_wastage=1 in the details frame
-        if "is_wastage" in frame.columns:
-            # Get all receipts that have wastage items
-            wastage_receipts = (
-                frame[frame["is_wastage"] == 1][["c_date", "store_name", "sales_no"]]
-                .drop_duplicates()
-            )
-            wastage_receipts["_is_wastage_receipt"] = True
-        else:
-            # Fallback to old method if is_wastage column not available
-            wastage_receipts = (
-                payment_frame.assign(payment_name=payment_frame.get("payment_name", pd.Series("", index=payment_frame.index, dtype="object")).astype(str).str.upper())
-                .loc[lambda df: df["payment_name"].eq("WASTAGE"), ["c_date", "store_name", "sales_no"]]
-                .drop_duplicates()
-            )
-            wastage_receipts["_is_wastage_receipt"] = True
+        wastage_receipts = (
+            payment_frame.assign(payment_name=payment_frame.get("payment_name", "").astype(str).str.upper())
+            .loc[lambda df: df["payment_name"].eq("WASTAGE"), ["c_date", "store_name", "sales_no"]]
+            .drop_duplicates()
+        )
+        wastage_receipts["_is_wastage_receipt"] = True
 
-        # Apply outlet name mapping for Epoint data
-        outlet_mapping = {
-            "204": "204- WEST GATE",
-            "206": "206- SELETAR MALL",
-            "207": "207- SERANGOON NEX",
-            "208": "208- SUN PLAZA",
-            "209": "209- IMM MALL",
-            "211": "211- WHITE SANDS",
-            "212": "212- JURONG POINT",
-            "214": "214- HILLION MALL",
-            "215": "215- HEARTLAND MALL",
-            "216": "216- WATERWAY POINT",
-            "217": "217- HEARTBEAT BEDOK",
-            "218": "218- NORTHPOINT CITY",
-            "221": "221- FUNAN",
-            "222": "222- PAYA LEBAR QUARTER",
-            "223": "223- HOUGANG MALL",
-            "224": "224- PARKWAY PARADE",
-            "225": "225- CLEMENTI MALL",
-            "226": "226- CENTURY SQUARE",
-            "227": "227- SENGKANG GRAND",
-            "228": "228- WEST MALL",
-            "229": "229- PARKWAY PARADE 2",
-            "301": "301 - WOODLAND",
-            "302": "302 - GRANTRAL MALL",
-            "303": "303 - TAMPINES",
-            "304": "304 - TOA PAYOH",
-            "306": "306 - J8",
-            "307": "307 - HGTO",
-            "308": "308 - OASIS",
-            "309": "309 - YEW TEE SQUARE",
-            "310": "310 - SENGKANG MRT",
-            "311": "311 - THE POIZ CENTRE",
-            "312": "312 - ANG MO KIO",
-            "313": "313 - CANBERRA PLAZA",
-            "314": "314 - BUKIT GOMBAK",
-            "316": "316 - PASIR RIS MRT",
-            "317": "317 - NORTHPOINT",
-            "401": "401 - BUGIS JUNCTION",
-            "402": "402 - 313 SOMERSET",
-            "403": "403 - TAMPINES ONE",
-        }
-        
-        # Map store codes to proper outlet names
-        store_codes = frame.get("store_name", pd.Series("", index=frame.index, dtype="object"))
-        frame["Outlet"] = store_codes.map(outlet_mapping).fillna(store_codes).astype(str)
-        frame["Item Name"] = frame.get("item_name", pd.Series("", index=frame.index, dtype="object")).astype(str)
-        frame["Category"] = frame.get("category_code", pd.Series("", index=frame.index, dtype="object")).astype(str)
-        frame["sales_no"] = frame.get("sales_no", pd.Series("", index=frame.index, dtype="object")).astype(str)
+        frame["Outlet"] = frame.get("store_name", "").astype(str)
+        frame["Item Name"] = frame.get("item_name", "").astype(str)
+        frame["Category"] = frame.get("category_code", "").astype(str)
+        frame["sales_no"] = frame.get("sales_no", "").astype(str)
 
         # Base numeric fields
-        frame["Sales"] = pd.to_numeric(frame.get("sub_total", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
-        frame["Quantity"] = pd.to_numeric(frame.get("qty", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+        frame["Sales"] = pd.to_numeric(frame.get("sub_total"), errors="coerce").fillna(0.0)
+        frame["Quantity"] = pd.to_numeric(frame.get("qty"), errors="coerce").fillna(0.0)
 
         # Nett sales per item (align with payment logic)
-        disc_amt = pd.to_numeric(frame.get("disc_amt", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
-        promo_disc = pd.to_numeric(frame.get("pro_disc_amt", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
-        svc_amt = pd.to_numeric(frame.get("svc_amt", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
-        tax_amt = pd.to_numeric(frame.get("tax_amt", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+        disc_amt = pd.to_numeric(frame.get("disc_amt"), errors="coerce").fillna(0.0)
+        promo_disc = pd.to_numeric(frame.get("pro_disc_amt"), errors="coerce").fillna(0.0)
+        svc_amt = pd.to_numeric(frame.get("svc_amt"), errors="coerce").fillna(0.0)
+        tax_amt = pd.to_numeric(frame.get("tax_amt"), errors="coerce").fillna(0.0)
 
         frame = frame.merge(wastage_receipts, on=["c_date", "store_name", "sales_no"], how="left")
         wastage_flag = frame.get("_is_wastage_receipt")
@@ -2921,27 +2519,7 @@ class DataRepository(QtCore.QObject):
             is_wastage = wastage_flag.astype("boolean").fillna(False)
         frame["Wastage"] = np.where(is_wastage.to_numpy(dtype=bool, na_value=False), frame["Quantity"], 0.0)
         if "_is_wastage_receipt" in frame.columns:
-            frame = frame.drop(columns=["_is_wastage_receipt"])
-
-        # Apply tax deduction logic for Sushi Express
-        if "source_database" in frame:
-            source_db_fmt = frame["source_database"].astype(str)
-        else:
-            source_db_fmt = pd.Series("", index=frame.index, dtype="object")
-
-        if "take_away_item" in frame:
-            takeaway_flag_fmt = frame["take_away_item"].astype(str).str.upper()
-        else:
-            takeaway_flag_fmt = pd.Series("", index=frame.index, dtype="object")
-        
-        epoint_mask_fmt = source_db_fmt.eq("sushi_epoint_pos_live")
-        takeaway_mask_fmt = takeaway_flag_fmt.eq("Y")
-        # Fix tax deduction logic - divide by 1.09 only for Epoint non-dine-in (takeaway and others)
-        # Sushi Express and other databases keep tax included, Epoint dine-in keeps tax included
-        # Only Epoint non-dine-in needs to remove GST by dividing by 1.09
-        tax_deduction_fmt = np.where(epoint_mask_fmt & takeaway_mask_fmt, frame["Sales"] * 0.09 / 1.09, 0.0)
-        
-        frame["Nett Sales"] = frame["Sales"] - disc_amt - promo_disc - tax_deduction_fmt + svc_amt
+            frame.drop(columns=["_is_wastage_receipt"], inplace=True)
 
         frame["Date"] = pd.to_datetime(frame["c_date"], errors="coerce")
         frame["WeekLabel"] = frame["Date"].dt.strftime("%Y-W%V")
@@ -2988,253 +2566,104 @@ class DataRepository(QtCore.QObject):
     ) -> Dict[str, pd.DataFrame]:
         if detail_frame.empty:
             return {mode: pd.DataFrame(columns=PROMOTION_ANALYSIS_COLUMNS[mode]) for mode in PERIOD_OPTIONS}
-
-        frame = detail_frame.copy()
-        frame["Date"] = pd.to_datetime(frame["c_date"], errors="coerce")
-        frame["YearMonth"] = frame["Date"].dt.to_period("M").astype(str)
-        frame["WeekLabel"] = frame["Date"].dt.strftime("%Y-W%V")
-        
-        # Apply outlet name mapping for Epoint data
-        outlet_mapping = {
-            "204": "204- WEST GATE",
-            "206": "206- SELETAR MALL",
-            "207": "207- SERANGOON NEX",
-            "208": "208- SUN PLAZA",
-            "209": "209- IMM MALL",
-            "211": "211- WHITE SANDS",
-            "212": "212- JURONG POINT",
-            "214": "214- HILLION MALL",
-            "215": "215- HEARTLAND MALL",
-            "216": "216- WATERWAY POINT",
-            "217": "217- HEARTBEAT BEDOK",
-            "218": "218- NORTHPOINT CITY",
-            "221": "221- FUNAN",
-            "222": "222- PAYA LEBAR QUARTER",
-            "223": "223- HOUGANG MALL",
-            "224": "224- PARKWAY PARADE",
-            "225": "225- CLEMENTI MALL",
-            "226": "226- CENTURY SQUARE",
-            "227": "227- SENGKANG GRAND",
-            "228": "228- WEST MALL",
-            "229": "229- PARKWAY PARADE 2",
-            "301": "301 - WOODLAND",
-            "302": "302 - GRANTRAL MALL",
-            "303": "303 - TAMPINES",
-            "304": "304 - TOA PAYOH",
-            "306": "306 - J8",
-            "307": "307 - HGTO",
-            "308": "308 - OASIS",
-            "309": "309 - YEW TEE SQUARE",
-            "310": "310 - SENGKANG MRT",
-            "311": "311 - THE POIZ CENTRE",
-            "312": "312 - ANG MO KIO",
-            "313": "313 - CANBERRA PLAZA",
-            "314": "314 - BUKIT GOMBAK",
-            "316": "316 - PASIR RIS MRT",
-            "317": "317 - NORTHPOINT",
-            "401": "401 - BUGIS JUNCTION",
-            "402": "402 - 313 SOMERSET",
-            "403": "403 - TAMPINES ONE",
-        }
-        
-        # Map store codes to proper outlet names
-        store_codes = frame.get("store_name", pd.Series("", index=frame.index, dtype="object"))
-        frame["Outlet"] = store_codes.map(outlet_mapping).fillna(store_codes).astype(str)
-
+        conn = duckdb.connect(database=":memory:")
+        conn.register("details", detail_frame)
         brand_lookup = store_brand_map.drop_duplicates(subset=["store_name"]).rename(columns={"store_name": "Outlet"})
-        frame = frame.merge(brand_lookup, on="Outlet", how="left")
-
-        base_columns = {
-            "Sales": pd.to_numeric(frame.get("sub_total", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0),
-            "Quantity": pd.to_numeric(frame.get("qty", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0),
-            "Transaction": frame.get("sales_no", pd.Series("", index=frame.index, dtype="object")).astype(str),
-        }
-        frame["Sales"] = base_columns["Sales"]
-        frame["Quantity"] = base_columns["Quantity"]
-        frame["Transaction"] = base_columns["Transaction"]
-
+        conn.register("brand_lookup", brand_lookup)
+        use_discount: bool
         if state.products:
-            name_column = frame.get("item_name", pd.Series("", index=frame.index, dtype="object")).astype(str)
+            use_discount = False
         elif state.discounts:
-            name_column = frame.get("disc_name", pd.Series("", index=frame.index, dtype="object")).astype(str)
+            use_discount = True
         else:
-            item_sales = frame.groupby("item_name", dropna=False)["Sales"].sum()
-            discount_sales = frame.groupby("disc_name", dropna=False)["Sales"].sum()
-            if item_sales.sum() >= discount_sales.sum():
-                name_column = frame.get("item_name", pd.Series("", index=frame.index, dtype="object")).astype(str)
-            else:
-                name_column = frame.get("disc_name", pd.Series("", index=frame.index, dtype="object")).astype(str)
-
-        frame["Item / Discount Name"] = name_column.fillna("")
-        frame = frame[frame["Item / Discount Name"].str.strip().ne("")]
-        if frame.empty:
-            return {mode: pd.DataFrame(columns=PROMOTION_ANALYSIS_COLUMNS[mode]) for mode in PERIOD_OPTIONS}
-
-        group_keys = [
-            ("Date", "Daily"),
-            ("WeekLabel", "Weekly"),
-            ("YearMonth", "Monthly"),
-        ]
-
-        period_frames: Dict[str, pd.DataFrame] = {}
-
-        def _aggregate(df: pd.DataFrame, period_label: Optional[str], columns: List[str]) -> pd.DataFrame:
-            working = df.copy()
-            if period_label is None:
-                working["Period"] = "Selected Period"
-                grouping = ["Period", "Outlet", "Item / Discount Name"]
-            else:
-                if period_label not in working.columns:
-                    self.log_message.emit(
-                        f"[PROMOTION] Missing period label '{period_label}' column. Defaulting to selected period."
-                    )
-                    working["Period"] = "Selected Period"
-                else:
-                    working["Period"] = working[period_label]
-                grouping = ["Period", "Outlet", "Item / Discount Name"]
-
-            for column in grouping:
-                if column not in working.columns:
-                    default = "Selected Period" if column == "Period" else ""
-                    working[column] = default
-
-            aggregated = (
-                working.groupby(grouping, as_index=False)
-                .agg(
-                    Sales=("Sales", "sum"),
-                    Transaction=("Transaction", "nunique"),
-                    Quantity=("Quantity", "sum"),
-                )
+            use_discount = False
+        def build_sql(mode: str) -> str:
+            period_expr = {
+                "Daily": "strftime('%Y-%m-%d', CAST(c_date AS TIMESTAMP))",
+                "Weekly": "strftime('%Y-W%V', CAST(c_date AS TIMESTAMP))",
+                "Monthly": "strftime('%Y-%m', CAST(c_date AS TIMESTAMP))",
+                "Period": "'Selected Period'",
+            }[mode]
+            name_expr = "COALESCE(CAST(disc_name AS VARCHAR), '')" if use_discount else "COALESCE(CAST(item_name AS VARCHAR), '')"
+            return f"""
+            WITH base AS (
+                SELECT
+                    {period_expr} AS Period,
+                    CAST(store_name AS VARCHAR) AS Outlet,
+                    {name_expr} AS name,
+                    CAST(sub_total AS DOUBLE) AS Sales,
+                    CAST(qty AS DOUBLE) AS Quantity,
+                    CAST(sales_no AS VARCHAR) AS Transaction
+                FROM details
+                WHERE {name_expr} != ''
+            ), summary AS (
+                SELECT Period, Outlet, name,
+                    SUM(Sales) AS Sales,
+                    SUM(Quantity) AS Quantity,
+                    COUNT(DISTINCT Transaction) AS Transaction
+                FROM base
+                GROUP BY Period, Outlet, name
+            ), outlet_totals AS (
+                SELECT Period, Outlet,
+                    SUM(Sales) AS OutletSales,
+                    SUM(Transaction) AS OutletTx,
+                    SUM(Quantity) AS OutletQty
+                FROM summary
+                GROUP BY Period, Outlet
+            ), joined AS (
+                SELECT s.Period, s.Outlet, s.name AS "Item / Discount Name",
+                    s.Sales, s.Transaction, s.Quantity,
+                    CASE WHEN ot.OutletSales > 0 THEN (s.Sales / ot.OutletSales) * 100.0 ELSE 0.0 END AS "Sales Ratio %",
+                    CASE WHEN ot.OutletTx > 0 THEN (s.Transaction / ot.OutletTx) * 100.0 ELSE 0.0 END AS "Transaction Ratio %",
+                    CASE WHEN ot.OutletQty > 0 THEN (s.Quantity / ot.OutletQty) * 100.0 ELSE 0.0 END AS "Quantity Ratio %"
+                FROM summary s
+                LEFT JOIN outlet_totals ot USING (Period, Outlet)
+            ), brand_rows AS (
+                SELECT j.Period, bl.BrandGroup AS Outlet, j."Item / Discount Name",
+                    SUM(j.Sales) AS Sales,
+                    SUM(j.Transaction) AS Transaction,
+                    SUM(j.Quantity) AS Quantity,
+                    100.0 AS "Sales Ratio %",
+                    100.0 AS "Transaction Ratio %",
+                    100.0 AS "Quantity Ratio %"
+                FROM joined j
+                LEFT JOIN brand_lookup bl ON bl.Outlet = j.Outlet
+                WHERE bl.BrandGroup IS NOT NULL
+                GROUP BY j.Period, bl.BrandGroup, j."Item / Discount Name"
+            ), totals AS (
+                SELECT j.Period, 'All' AS Outlet, j."Item / Discount Name",
+                    SUM(j.Sales) AS Sales,
+                    SUM(j.Transaction) AS Transaction,
+                    SUM(j.Quantity) AS Quantity,
+                    100.0 AS "Sales Ratio %",
+                    100.0 AS "Transaction Ratio %",
+                    100.0 AS "Quantity Ratio %"
+                FROM joined j
+                GROUP BY j.Period, j."Item / Discount Name"
             )
-
-            outlet_totals = (
-                aggregated.groupby(grouping[:-1], as_index=False)
-                .agg(
-                    OutletSales=("Sales", "sum"),
-                    OutletTx=("Transaction", "sum"),
-                    OutletQty=("Quantity", "sum"),
-                )
-            )
-
-            merged = aggregated.merge(outlet_totals, on=grouping[:-1], how="left")
-
-            def _ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
-                return np.where(denominator.gt(0), (numerator / denominator) * 100.0, 0.0)
-
-            merged["Sales Ratio %"] = _ratio(merged["Sales"], merged["OutletSales"])
-            merged["Transaction Ratio %"] = _ratio(merged["Transaction"], merged["OutletTx"])
-            merged["Quantity Ratio %"] = _ratio(merged["Quantity"], merged["OutletQty"])
-
-            merged["Sales"] = merged["Sales"].round(1)
-            merged["Quantity"] = merged["Quantity"].round(1)
-            merged["Transaction"] = merged["Transaction"].astype(int)
-            for column in ("Sales Ratio %", "Transaction Ratio %", "Quantity Ratio %"):
-                merged[column] = merged[column].round(2).map(lambda x: f"{x:.2f}%")
-
-            merged.drop(columns=["OutletSales", "OutletTx", "OutletQty"], inplace=True)
-
-            if "Period" not in merged.columns:
-                merged.insert(0, "Period", "Selected Period")
-
-            for column in columns:
-                if column not in merged.columns:
-                    merged[column] = {
-                        "Period": "Selected Period",
-                        "Outlet": "",
-                        "Item / Discount Name": "",
-                        "Sales": 0.0,
-                        "Transaction": 0,
-                        "Quantity": 0.0,
-                        "Sales Ratio %": "0.00%",
-                        "Transaction Ratio %": "0.00%",
-                        "Quantity Ratio %": "0.00%",
-                    }.get(column, "")
-
-            sort_fields = [field for field in PROMOTION_ANALYSIS_COLUMNS["Daily"] if field in merged.columns]
-            merged.sort_values(sort_fields, inplace=True)
-
-            try:
-                return merged.reindex(columns=columns)
-            except KeyError as exc:
-                available = list(merged.columns)
-                missing = [column for column in columns if column not in available]
-                self.log_message.emit(
-                    "[PROMOTION] Reindex failed. Missing columns: "
-                    f"{missing}. Available columns: {available}."
-                )
-                raise exc
-
-        for period_key, mode in group_keys:
-            period_df = _aggregate(frame, period_key, PROMOTION_ANALYSIS_COLUMNS[mode])
-            period_frames[mode] = period_df
-
-        period_frames["Period"] = _aggregate(frame, None, PROMOTION_ANALYSIS_COLUMNS["Period"])
-
-        enriched: Dict[str, pd.DataFrame] = {}
-        ratio_columns = [
-            "Sales Ratio %",
-            "Transaction Ratio %",
-            "Quantity Ratio %",
-        ]
-
-        for mode, df in period_frames.items():
+            SELECT * FROM joined
+            UNION ALL
+            SELECT * FROM brand_rows
+            UNION ALL
+            SELECT * FROM totals
+            """
+        result: Dict[str, pd.DataFrame] = {}
+        for mode in PERIOD_OPTIONS:
+            df = conn.execute(build_sql(mode)).fetchdf()
             if df.empty:
-                enriched[mode] = df
-                continue
-
-            working = df.copy()
-            value_columns = [col for col in ("Sales", "Transaction", "Quantity") if col in working.columns]
-            base_group = [col for col in ("Period",) if col in working.columns]
-
-            if value_columns and "Outlet" in working.columns:
-                if base_group:
-                    grouped = (
-                        df.groupby(base_group, as_index=False)[value_columns].sum()
-                    )
-                else:
-                    grouped = pd.DataFrame([{col: df[col].sum() for col in value_columns}])
-                if not base_group:
-                    grouped.index = pd.RangeIndex(len(grouped))
-                totals = grouped.copy()
-                totals["Outlet"] = "All"
-                if "Item / Discount Name" in working.columns:
-                    totals["Item / Discount Name"] = "All"
-                for column in ratio_columns:
-                    if column in working.columns:
-                        totals[column] = "100.00%"
-                working = pd.concat([working, totals], ignore_index=True, sort=False)
-
-            if value_columns:
-                summary_row: Dict[str, object] = {column: "" for column in working.columns}
-                for column in value_columns:
-                    summary_row[column] = float(df[column].sum())
-                if "Period" in working.columns:
-                    summary_row["Period"] = "SUMMARY"
-                if "Outlet" in working.columns:
-                    summary_row["Outlet"] = "All"
-                if "Item / Discount Name" in working.columns:
-                    summary_row["Item / Discount Name"] = "Total"
-                for column in ratio_columns:
-                    if column in working.columns:
-                        summary_row[column] = "100.00%"
-                overall_totals = pd.DataFrame([summary_row])
-                working = pd.concat([working, overall_totals], ignore_index=True, sort=False)
-
-            required = PROMOTION_ANALYSIS_COLUMNS.get(mode, list(working.columns))
-            for column in required:
-                if column not in working.columns:
-                    working[column] = "" if column not in {"Sales", "Transaction", "Quantity"} else 0
-
-            # Ensure numeric totals remain numeric
-            for column in value_columns:
-                working[column] = pd.to_numeric(working[column], errors="coerce").fillna(0.0)
-
-            enriched[mode] = working.reindex(columns=required)
-
-        return {
-            mode: enriched.get(mode, pd.DataFrame(columns=PROMOTION_ANALYSIS_COLUMNS[mode]))
-            for mode in PERIOD_OPTIONS
-        }
+                result[mode] = pd.DataFrame(columns=PROMOTION_ANALYSIS_COLUMNS[mode])
+            else:
+                df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0.0).round(1)
+                df["Transaction"] = pd.to_numeric(df["Transaction"], errors="coerce").fillna(0).astype(int)
+                df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0.0).round(1)
+                df["Sales Ratio %"] = df["Sales Ratio %"].round(2).map(lambda x: f"{x:.2f}%")
+                df["Transaction Ratio %"] = df["Transaction Ratio %"].round(2).map(lambda x: f"{x:.2f}%")
+                df["Quantity Ratio %"] = df["Quantity Ratio %"].round(2).map(lambda x: f"{x:.2f}%")
+                sort_fields = [f for f in PROMOTION_ANALYSIS_COLUMNS["Daily"] if f in df.columns]
+                df.sort_values(sort_fields, inplace=True)
+                result[mode] = df.reindex(columns=PROMOTION_ANALYSIS_COLUMNS[mode])
+        conn.close()
+        return result
 
     def _format_product_period(
         self,
@@ -3389,325 +2818,186 @@ class DataRepository(QtCore.QObject):
         receipt_totals: pd.DataFrame,
         store_brand_map: pd.DataFrame,
     ) -> pd.DataFrame:
-        payment_receipt = payment_receipt.copy()
-        payment_receipt["Date"] = pd.to_datetime(payment_receipt["c_date"], errors="coerce")
-        payment_receipt["YearMonth"] = payment_receipt["Date"].dt.to_period("M").astype(str)
-        payment_receipt["WeekLabel"] = payment_receipt["Date"].dt.strftime("%Y-W%V")
-        
-        # Apply outlet name mapping for Epoint data
-        outlet_mapping = {
-            "204": "204- WEST GATE",
-            "206": "206- SELETAR MALL",
-            "207": "207- SERANGOON NEX",
-            "208": "208- SUN PLAZA",
-            "209": "209- IMM MALL",
-            "211": "211- WHITE SANDS",
-            "212": "212- JURONG POINT",
-            "214": "214- HILLION MALL",
-            "215": "215- HEARTLAND MALL",
-            "216": "216- WATERWAY POINT",
-            "217": "217- HEARTBEAT BEDOK",
-            "218": "218- NORTHPOINT CITY",
-            "221": "221- FUNAN",
-            "222": "222- PAYA LEBAR QUARTER",
-            "223": "223- HOUGANG MALL",
-            "224": "224- PARKWAY PARADE",
-            "225": "225- CLEMENTI MALL",
-            "226": "226- CENTURY SQUARE",
-            "227": "227- SENGKANG GRAND",
-            "228": "228- WEST MALL",
-            "229": "229- PARKWAY PARADE 2",
-            "301": "301 - WOODLAND",
-            "302": "302 - GRANTRAL MALL",
-            "303": "303 - TAMPINES",
-            "304": "304 - TOA PAYOH",
-            "306": "306 - J8",
-            "307": "307 - HGTO",
-            "308": "308 - OASIS",
-            "309": "309 - YEW TEE SQUARE",
-            "310": "310 - SENGKANG MRT",
-            "311": "311 - THE POIZ CENTRE",
-            "312": "312 - ANG MO KIO",
-            "313": "313 - CANBERRA PLAZA",
-            "314": "314 - BUKIT GOMBAK",
-            "316": "316 - PASIR RIS MRT",
-            "317": "317 - NORTHPOINT",
-            "401": "401 - BUGIS JUNCTION",
-            "402": "402 - 313 SOMERSET",
-            "403": "403 - TAMPINES ONE",
-        }
-        
-        # Map store codes to proper outlet names
-        store_codes = payment_receipt.get("store_name", pd.Series("", index=payment_receipt.index, dtype="object"))
-        payment_receipt["Outlet"] = store_codes.map(outlet_mapping).fillna(store_codes).astype(str)
-
-        group_cols = ["Date", "store_name", "sales_no"]
-        total_tender = payment_receipt.groupby(group_cols)["tender_amount"].transform("sum").fillna(0.0)
-        tax_total = payment_receipt.groupby(group_cols)["tax_total"].transform("max").fillna(0.0)
-        net_total = payment_receipt.groupby(group_cols)["net_total"].transform("max").fillna(0.0)
-
-        tender_ratio = np.divide(
-            payment_receipt["tender_amount"],
-            total_tender,
-            out=np.zeros_like(payment_receipt["tender_amount"], dtype=float),
-            where=total_tender.ne(0.0),
+        conn = duckdb.connect(database=":memory:")
+        conn.register("payment_receipt", payment_receipt)
+        conn.register("receipt_totals", receipt_totals)
+        brand_lookup = store_brand_map.drop_duplicates(subset=["store_name"]) 
+        conn.register("brand_lookup", brand_lookup)
+        sql = """
+        WITH pr AS (
+            SELECT
+                CAST(p.c_date AS TIMESTAMP) AS c_date,
+                DATE(CAST(p.c_date AS TIMESTAMP)) AS Date,
+                strftime('%Y-%m', CAST(p.c_date AS TIMESTAMP)) AS YearMonth,
+                strftime('%Y-W%V', CAST(p.c_date AS TIMESTAMP)) AS WeekLabel,
+                CAST(p.store_name AS VARCHAR) AS store_name,
+                CAST(p.sales_no AS VARCHAR) AS sales_no,
+                CAST(p.payment_name AS VARCHAR) AS payment_name,
+                CAST(p.tender_amount AS DOUBLE) AS tender_amount,
+                CAST(p.net_total AS DOUBLE) AS mx_net
+            FROM payment_receipt p
+        ), base AS (
+            SELECT
+                *,
+                SUM(tender_amount) OVER (PARTITION BY Date, store_name, sales_no) AS total_tender,
+                CASE WHEN UPPER(payment_name) LIKE '%CASH%' THEN 1 ELSE 0 END AS is_cash,
+                SUM(CASE WHEN UPPER(payment_name) LIKE '%CASH%' THEN tender_amount ELSE 0 END) OVER (PARTITION BY Date, store_name, sales_no) AS cash_tender_total,
+                SUM(CASE WHEN UPPER(payment_name) NOT LIKE '%CASH%' THEN tender_amount ELSE 0 END) OVER (PARTITION BY Date, store_name, sales_no) AS noncash_sum,
+                CASE WHEN UPPER(payment_name) NOT LIKE '%CASH%' THEN tender_amount ELSE 0 END AS noncash_tender
+            FROM pr
+        ), with_brand AS (
+            SELECT b.*, bl.BrandGroup
+            FROM base b
+            LEFT JOIN brand_lookup bl ON bl.store_name = b.store_name
+        ), alloc_gogo AS (
+            SELECT
+                wb.*, 
+                CASE WHEN wb.BrandGroup = 'GOGO' AND wb.noncash_sum > 0 AND wb.is_cash = 0
+                     THEN (wb.noncash_tender / wb.noncash_sum) * wb.mx_net
+                     ELSE 0 END AS noncash_alloc
+            FROM with_brand wb
+        ), alloc_sums AS (
+            SELECT *,
+                   SUM(noncash_alloc) OVER (PARTITION BY Date, store_name, sales_no) AS noncash_alloc_sum,
+                   CASE WHEN cash_tender_total > 0 THEN tender_amount / cash_tender_total ELSE 0 END AS cash_share
+            FROM alloc_gogo
+        ), with_cash AS (
+            SELECT *,
+                CASE WHEN BrandGroup = 'GOGO'
+                     THEN CASE WHEN is_cash = 1
+                               THEN cash_share * GREATEST(mx_net - noncash_alloc_sum, 0)
+                               ELSE noncash_alloc END
+                     ELSE tender_amount END AS allocated_sales
+            FROM alloc_sums
+        ), grouped AS (
+            SELECT
+                Date, WeekLabel, YearMonth, store_name, sales_no, payment_name,
+                SUM(allocated_sales) AS payment_sales,
+                MAX(mx_net) AS bill_total
+            FROM with_cash
+            GROUP BY Date, WeekLabel, YearMonth, store_name, sales_no, payment_name
+        ), outlet_rollups AS (
+            SELECT
+                DATE(CAST(r.c_date AS TIMESTAMP)) AS Date,
+                strftime('%Y-%m', CAST(r.c_date AS TIMESTAMP)) AS YearMonth,
+                strftime('%Y-W%V', CAST(r.c_date AS TIMESTAMP)) AS WeekLabel,
+                CAST(r.store_name AS VARCHAR) AS store_name,
+                SUM(CAST(r.net_total AS DOUBLE)) AS outlet_bill_sales,
+                COUNT(DISTINCT CAST(r.sales_no AS VARCHAR)) AS outlet_receipts
+            FROM receipt_totals r
+            GROUP BY Date, WeekLabel, YearMonth, store_name
+        ), outlet_payment_totals AS (
+            SELECT
+                Date, WeekLabel, YearMonth, store_name,
+                SUM(payment_sales) AS outlet_payment_sales
+            FROM grouped
+            GROUP BY Date, WeekLabel, YearMonth, store_name
+        ), payment_summary AS (
+            SELECT
+                g.Date, g.WeekLabel, g.YearMonth, g.store_name, g.payment_name,
+                SUM(g.payment_sales) AS payment_sales,
+                COUNT(DISTINCT g.sales_no) AS receipts,
+                SUM(g.bill_total) AS bill_sales
+            FROM grouped g
+            GROUP BY g.Date, g.WeekLabel, g.YearMonth, g.store_name, g.payment_name
+        ), joined AS (
+            SELECT
+                ps.Date,
+                ps.WeekLabel,
+                ps.YearMonth,
+                ps.store_name,
+                ps.payment_name,
+                ps.payment_sales,
+                ps.receipts,
+                ps.bill_sales,
+                CASE WHEN opt.outlet_payment_sales > 0 THEN (ps.payment_sales / opt.outlet_payment_sales) * 100.0 ELSE 0.0 END AS "Sales Ratio %",
+                CASE WHEN orp.outlet_receipts > 0 THEN (ps.receipts / orp.outlet_receipts) * 100.0 ELSE 0.0 END AS "TC Ratio %",
+                0 AS IsTotal
+            FROM payment_summary ps
+            LEFT JOIN outlet_rollups orp USING (Date, WeekLabel, YearMonth, store_name)
+            LEFT JOIN outlet_payment_totals opt USING (Date, WeekLabel, YearMonth, store_name)
+        ), totals_rows AS (
+            SELECT
+                orp.Date,
+                orp.WeekLabel,
+                orp.YearMonth,
+                orp.store_name,
+                'TOTAL' AS payment_name,
+                COALESCE(opt.outlet_payment_sales, 0) AS payment_sales,
+                orp.outlet_receipts AS receipts,
+                orp.outlet_bill_sales AS bill_sales,
+                100.0 AS "Sales Ratio %",
+                100.0 AS "TC Ratio %",
+                1 AS IsTotal
+            FROM outlet_rollups orp
+            LEFT JOIN outlet_payment_totals opt USING (Date, WeekLabel, YearMonth, store_name)
         )
-        base_alloc = payment_receipt["tender_amount"] - tender_ratio * tax_total
-        base_alloc = np.maximum(base_alloc, 0.0)
-
-        is_cash = payment_receipt["payment_name"].astype(str).str.contains("CASH", case=False, na=False)
-        payment_receipt["_base_non_cash"] = np.where(is_cash, 0.0, base_alloc)
-
-        non_cash_sum = payment_receipt.groupby(group_cols)["_base_non_cash"].transform("sum")
-        scale_reduce = np.where(
-            (non_cash_sum > 0) & (net_total < non_cash_sum),
-            np.maximum(net_total / non_cash_sum, 0.0),
-            1.0,
-        )
-        payment_receipt["_base_non_cash"] *= scale_reduce
-
-        non_cash_sum = payment_receipt.groupby(group_cols)["_base_non_cash"].transform("sum")
-        payment_receipt["_cash_tender"] = np.where(is_cash, payment_receipt["tender_amount"], 0.0)
-        cash_tender_total = payment_receipt.groupby(group_cols)["_cash_tender"].transform("sum")
-
-        no_cash_scale = np.where(
-            (cash_tender_total == 0) & (non_cash_sum > 0),
-            np.maximum(net_total / non_cash_sum, 0.0),
-            1.0,
-        )
-        payment_receipt["_base_non_cash"] *= no_cash_scale
-
-        non_cash_sum = payment_receipt.groupby(group_cols)["_base_non_cash"].transform("sum")
-        remainder = np.maximum(net_total - non_cash_sum, 0.0)
-
-        cash_share = np.where(
-            is_cash & cash_tender_total.gt(0),
-            payment_receipt["tender_amount"] / cash_tender_total,
-            0.0,
-        )
-        cash_alloc = cash_share * remainder
-
-        payment_receipt["allocated_sales"] = np.where(is_cash, cash_alloc, payment_receipt["_base_non_cash"])
-
-        brand_lookup = store_brand_map.drop_duplicates(subset=["store_name"]).rename(columns={"store_name": "Outlet"})
-        payment_receipt = payment_receipt.merge(brand_lookup, on="Outlet", how="left")
-
-        payment_receipt_group = (
-            payment_receipt.groupby(
-                ["Date", "WeekLabel", "YearMonth", "Outlet", "sales_no", "payment_name", "BrandGroup"], as_index=False
-            )
-            .agg(
-                payment_sales=("allocated_sales", "sum"),
-                bill_total=("net_total", "max"),
-            )
-        )
-
-        payment_receipt.drop(
-            columns=["_base_non_cash", "_cash_tender", "allocated_sales", "total_tender"],
-            inplace=True,
-            errors="ignore",
-        )
-
-        outlet_totals = receipt_totals.copy()
-        outlet_totals["Date"] = pd.to_datetime(outlet_totals["c_date"], errors="coerce")
-        outlet_totals["YearMonth"] = outlet_totals["Date"].dt.to_period("M").astype(str)
-        outlet_totals["WeekLabel"] = outlet_totals["Date"].dt.strftime("%Y-W%V")
-        
-        # Apply outlet name mapping to outlet_totals
-        store_codes_outlet = outlet_totals.get("store_name", pd.Series("", index=outlet_totals.index, dtype="object"))
-        outlet_totals["Outlet"] = store_codes_outlet.map(outlet_mapping).fillna(store_codes_outlet).astype(str)
-
-        outlet_rollups = (
-            outlet_totals.groupby(["Date", "WeekLabel", "YearMonth", "Outlet"], as_index=False)
-            .agg(
-                outlet_bill_sales=("net_total", "sum"),
-                outlet_receipts=("sales_no", "nunique"),
-            )
-        )
-
-        payment_summary = (
-            payment_receipt_group.groupby(["Date", "WeekLabel", "YearMonth", "Outlet", "payment_name"], as_index=False)
-            .agg(
-                payment_sales=("payment_sales", "sum"),
-                receipts=("sales_no", "nunique"),
-                bill_sales=("bill_total", "sum"),
-            )
-        )
-
-        outlet_payment_totals = (
-            payment_receipt_group.groupby(["Date", "WeekLabel", "YearMonth", "Outlet"], as_index=False)
-            .agg(payment_sales=("payment_sales", "sum"))
-            .rename(columns={"payment_sales": "outlet_payment_sales"})
-        )
-
-        payment_summary = payment_summary.merge(
-            outlet_rollups, on=["Date", "WeekLabel", "YearMonth", "Outlet"], how="left"
-        ).merge(
-            outlet_payment_totals, on=["Date", "WeekLabel", "YearMonth", "Outlet"], how="left"
-        )
-
-        payment_summary["Sales Ratio %"] = np.where(
-            payment_summary["outlet_payment_sales"].gt(0),
-            (payment_summary["payment_sales"] / payment_summary["outlet_payment_sales"]) * 100.0,
-            0.0,
-        )
-        payment_summary["TC Ratio %"] = np.where(
-            payment_summary["outlet_receipts"].gt(0),
-            (payment_summary["receipts"] / payment_summary["outlet_receipts"]) * 100.0,
-            0.0,
-        )
-
-        totals_rows = outlet_rollups.merge(
-            outlet_payment_totals, on=["Date", "WeekLabel", "YearMonth", "Outlet"], how="left"
-        )
-        totals_rows["payment_name"] = "TOTAL"
-        totals_rows.rename(
-            columns={
-                "outlet_payment_sales": "payment_sales",
-                "outlet_bill_sales": "bill_sales",
-            },
-            inplace=True,
-        )
-        totals_rows["receipts"] = totals_rows["outlet_receipts"].astype(int)
-        totals_rows["Sales Ratio %"] = 100.0
-        totals_rows["TC Ratio %"] = 100.0
-
-        payment_summary = pd.concat([payment_summary, totals_rows], ignore_index=True, sort=False)
-        payment_summary["IsTotal"] = payment_summary["payment_name"].eq("TOTAL").astype(int)
-
-        detailed_rows = payment_summary[payment_summary["IsTotal"] == 0].copy()
-        if not detailed_rows.empty:
-            brand_grouped = detailed_rows.merge(brand_lookup, on="Outlet", how="left")
-            brand_grouped = brand_grouped.dropna(subset=["BrandGroup"])
-
-            brand_outlet = (
-                brand_grouped.groupby(["Date", "WeekLabel", "YearMonth", "BrandGroup", "payment_name"], as_index=False)
-                .agg(
-                    payment_sales=("payment_sales", "sum"),
-                    receipts=("receipts", "sum"),
-                    bill_sales=("bill_sales", "sum"),
-                )
-            )
-
-            brand_totals = (
-                brand_grouped.groupby(["Date", "WeekLabel", "YearMonth", "BrandGroup"], as_index=False)
-                .agg(
-                    period_payment_sales=("payment_sales", "sum"),
-                    period_bill_sales=("bill_sales", "sum"),
-                )
-            )
-
-            brand_receipt_totals = (
-                outlet_rollups.merge(brand_lookup, on="Outlet", how="left")
-                .dropna(subset=["BrandGroup"])
-                .groupby(["Date", "WeekLabel", "YearMonth", "BrandGroup"], as_index=False)
-                .agg(period_receipts=("outlet_receipts", "sum"))
-            )
-
-            brand_outlet = brand_outlet.merge(brand_totals, on=["Date", "WeekLabel", "YearMonth", "BrandGroup"], how="left")
-            brand_outlet = brand_outlet.merge(brand_receipt_totals, on=["Date", "WeekLabel", "YearMonth", "BrandGroup"], how="left")
-            brand_outlet["Sales Ratio %"] = np.where(
-                brand_outlet["period_payment_sales"].gt(0),
-                (brand_outlet["payment_sales"] / brand_outlet["period_payment_sales"]) * 100.0,
-                0.0,
-            )
-            brand_outlet["TC Ratio %"] = np.where(
-                brand_outlet["period_receipts"].gt(0),
-                (brand_outlet["receipts"] / brand_outlet["period_receipts"]) * 100.0,
-                0.0,
-            )
-            brand_outlet["Outlet"] = brand_outlet["BrandGroup"].map(lambda g: f"{g} All")
-            brand_outlet["IsTotal"] = 0
-            brand_outlet.drop(
-                columns=["period_payment_sales", "period_bill_sales", "period_receipts", "BrandGroup"],
-                inplace=True,
-            )
-
-            brand_totals = brand_totals.merge(brand_receipt_totals, on=["Date", "WeekLabel", "YearMonth", "BrandGroup"], how="left")
-            brand_totals = brand_totals.rename(
-                columns={
-                    "period_payment_sales": "payment_sales",
-                    "period_bill_sales": "bill_sales",
-                    "period_receipts": "receipts",
-                }
-            )
-            brand_totals["payment_name"] = "TOTAL"
-            brand_totals["Sales Ratio %"] = 100.0
-            brand_totals["TC Ratio %"] = 100.0
-            brand_totals["Outlet"] = brand_totals["BrandGroup"].map(lambda g: f"{g} All")
-            brand_totals["IsTotal"] = 1
-            brand_totals.drop(columns=["BrandGroup"], inplace=True)
-
-            payment_summary = pd.concat([payment_summary, brand_outlet, brand_totals], ignore_index=True, sort=False)
-
-        payment_summary["IsTotal"] = payment_summary["payment_name"].eq("TOTAL").astype(int)
-
-        payment_summary.drop(
-            columns=["outlet_bill_sales", "outlet_receipts", "outlet_payment_sales"],
-            inplace=True,
-            errors="ignore",
-        )
-
-        return payment_summary
+        SELECT Date, WeekLabel, YearMonth, store_name, payment_name, payment_sales, receipts, bill_sales, "Sales Ratio %", "TC Ratio %", IsTotal FROM joined
+        UNION ALL
+        SELECT Date, WeekLabel, YearMonth, store_name, payment_name, payment_sales, receipts, bill_sales, "Sales Ratio %", "TC Ratio %", IsTotal FROM totals_rows
+        """
+        result = self._exec_fetch_df(conn, sql)
+        conn.close()
+        return result
 
     def _format_payment_period(self, summary: pd.DataFrame, mode: str) -> pd.DataFrame:
         columns = self._payment_columns_for_mode(mode)
-        if summary.empty:
+        if summary is None or getattr(summary, "empty", True):
             return pd.DataFrame(columns=columns)
-
-        frame = summary.copy()
-        frame["Payment Sales"] = frame["payment_sales"].round(1)
-        frame["Receipt"] = frame["receipts"].astype(int)
-        frame["Bill Sales"] = frame["bill_sales"].round(1)
-        frame["Sales Ratio %"] = frame["Sales Ratio %"].round(2)
-        frame["TC Ratio %"] = frame["TC Ratio %"].round(2)
-
-        if mode == "Daily":
-            frame["Period"] = frame["Date"].dt.strftime("%Y-%m-%d")
-        elif mode == "Weekly":
-            frame["Period"] = frame["WeekLabel"]
-        elif mode == "Monthly":
-            frame["Period"] = frame["YearMonth"]
-        else:
-            frame["Period"] = "Selected Period"
-
-        frame.rename(
-            columns={
-                "store_name": "Outlet",
-                "payment_name": "Payment Type",
-            },
-            inplace=True,
+        conn = duckdb.connect(database=":memory:")
+        conn.register("summary", summary)
+        period_expr = {
+            "Daily": "strftime('%Y-%m-%d', Date)",
+            "Weekly": "WeekLabel",
+            "Monthly": "YearMonth",
+            "Period": "'Selected Period'",
+        }[mode]
+        group_fields = "Period, Outlet, \"Payment Type\"" if mode != "Period" else "Outlet, \"Payment Type\""
+        sql = f"""
+        WITH base AS (
+            SELECT
+                {period_expr} AS Period,
+                CAST(store_name AS VARCHAR) AS Outlet,
+                CAST(payment_name AS VARCHAR) AS "Payment Type",
+                CAST(payment_sales AS DOUBLE) AS payment_sales,
+                CAST(receipts AS BIGINT) AS receipts,
+                CAST(bill_sales AS DOUBLE) AS bill_sales,
+                CAST("Sales Ratio %" AS DOUBLE) AS sales_ratio,
+                CAST("TC Ratio %" AS DOUBLE) AS tc_ratio,
+                CAST(IsTotal AS INTEGER) AS IsTotal
+            FROM summary
+        ), agg AS (
+            SELECT
+                {group_fields},
+                SUM(payment_sales) AS PaymentSales,
+                SUM(receipts) AS Receipt,
+                SUM(bill_sales) AS BillSales,
+                AVG(sales_ratio) AS SalesRatio,
+                AVG(tc_ratio) AS TCRatio,
+                MAX(IsTotal) AS IsTotal
+            FROM base
+            GROUP BY {group_fields}
         )
-
-        grouping = ["Period", "Outlet", "Payment Type"] if mode != "Period" else ["Outlet", "Payment Type"]
-        aggregated = (
-            frame.groupby(grouping, as_index=False)
-            .agg(
-                PaymentSales=("Payment Sales", "sum"),
-                Receipt=("Receipt", "sum"),
-                BillSales=("Bill Sales", "sum"),
-                SalesRatio=("Sales Ratio %", "mean"),
-                TCRatio=("TC Ratio %", "mean"),
-                IsTotal=("IsTotal", "max"),
-            )
-        )
-
-        aggregated["Payment Sales"] = aggregated["PaymentSales"].round(1)
-        aggregated["Bill Sales"] = aggregated["BillSales"].round(1)
-        aggregated["Receipt"] = aggregated["Receipt"].astype(int)
-        aggregated["Sales Ratio %"] = aggregated["SalesRatio"].round(2).map(lambda x: f"{x:.2f}%")
-        aggregated["TC Ratio %"] = aggregated["TCRatio"].round(2).map(lambda x: f"{x:.2f}%")
-
-        aggregated.drop(columns=["PaymentSales", "BillSales", "SalesRatio", "TCRatio"], inplace=True)
-
-        sort_fields = (["Period"] if "Period" in aggregated.columns else []) + ["Outlet", "IsTotal", "Payment Type"]
-        aggregated.sort_values(sort_fields, inplace=True)
-        aggregated.drop(columns=["IsTotal"], inplace=True)
-
-        if mode == "Weekly" and "Period" in aggregated.columns:
-            aggregated["Period"] = aggregated["Period"].astype(str).map(self._format_week_period_label)
-
-        return aggregated[columns]
+        SELECT
+            {group_fields},
+            ROUND(PaymentSales, 1) AS "Payment Sales",
+            CAST(Receipt AS INTEGER) AS "Receipt",
+            ROUND(BillSales, 1) AS "Bill Sales",
+            ROUND(SalesRatio, 2) AS "Sales Ratio %",
+            ROUND(TCRatio, 2) AS "TC Ratio %",
+            IsTotal
+        FROM agg
+        """
+        df = conn.execute(sql).fetchdf()
+        conn.close()
+        df["Sales Ratio %"] = df["Sales Ratio %"].map(lambda x: f"{x:.2f}%")
+        df["TC Ratio %"] = df["TC Ratio %"].map(lambda x: f"{x:.2f}%")
+        sort_fields = (["Period"] if "Period" in df.columns else []) + ["Outlet", "IsTotal", "Payment Type"]
+        df.sort_values(sort_fields, inplace=True)
+        df.drop(columns=["IsTotal"], inplace=True)
+        if mode == "Weekly" and "Period" in df.columns:
+            df["Period"] = df["Period"].astype(str).map(self._format_week_period_label)
+        return df[columns]
 
     def _build_discount_summary(
         self,
@@ -3729,112 +3019,214 @@ class DataRepository(QtCore.QObject):
             "Transaction Ratio",
             "Quantity Ratio",
         ]
-
-        if detail_frame.empty or "disc_amt" not in detail_frame.columns:
+        if detail_frame.empty:
             return pd.DataFrame(columns=columns)
-
-        discounts = detail_frame.copy()
-        discounts["Discount_Sales"] = pd.to_numeric(discounts.get("disc_amt"), errors="coerce").fillna(0.0)
-        discounts["Quantity"] = pd.to_numeric(discounts.get("qty"), errors="coerce").fillna(0.0)
-        discounts["Transaction"] = discounts.get("sales_no", pd.Series("", index=discounts.index, dtype="object")).astype(str)
-
-        discounts = discounts[discounts["Discount_Sales"].gt(0)]
-        if discounts.empty:
+        # ensure required columns exist
+        details_df = detail_frame.copy()
+        if "disc_amt" not in details_df.columns:
+            details_df["disc_amt"] = 0.0
+        if "pro_disc_amt" not in details_df.columns:
+            details_df["pro_disc_amt"] = 0.0
+        conn = duckdb.connect(database=":memory:")
+        conn.register("details", details_df)
+        conn.register("receipt_totals", receipt_totals)
+        brand_lookup = store_brand_map.drop_duplicates(subset=["store_name"]).rename(columns={"store_name": "Outlet"})
+        conn.register("brand_lookup", brand_lookup)
+        sql = """
+        WITH base AS (
+            SELECT
+                DATE(CAST(d.c_date AS TIMESTAMP)) AS Date,
+                strftime('%Y-%m', CAST(d.c_date AS TIMESTAMP)) AS YearMonth,
+                strftime('%Y-W%V', CAST(d.c_date AS TIMESTAMP)) AS WeekLabel,
+                CAST(d.store_name AS VARCHAR) AS Outlet,
+                TRIM(CAST(d.disc_name AS VARCHAR)) AS "Discount Name",
+                CAST(d.sales_no AS VARCHAR) AS Transaction,
+                (CAST(d.disc_amt AS DOUBLE) + CAST(d.pro_disc_amt AS DOUBLE)) AS Discount_Sales,
+                1.0 AS Quantity,
+                CAST(d.store_name AS VARCHAR) AS store_name,
+                CAST(d.sales_no AS VARCHAR) AS sales_no,
+                DATE(CAST(d.c_date AS TIMESTAMP)) AS c_date
+            FROM details d
+            WHERE d.c_date IS NOT NULL
+              AND d.disc_name IS NOT NULL
+              AND TRIM(CAST(d.disc_name AS VARCHAR)) != ''
+              AND (COALESCE(CAST(d.disc_amt AS DOUBLE),0) + COALESCE(CAST(d.pro_disc_amt AS DOUBLE),0)) > 0
+        ), joined AS (
+            SELECT b.*, CAST(r.net_total AS DOUBLE) AS ReceiptNet
+            FROM base b
+            LEFT JOIN (
+                SELECT DATE(CAST(c_date AS TIMESTAMP)) AS c_date, CAST(store_name AS VARCHAR) AS store_name, CAST(sales_no AS VARCHAR) AS sales_no, net_total
+                FROM receipt_totals
+            ) r USING (c_date, store_name, sales_no)
+        ), dedup AS (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY Date, WeekLabel, YearMonth, Outlet, "Discount Name", Transaction
+                ORDER BY sales_no
+            ) AS rn
+            FROM joined
+        ), with_bill AS (
+            SELECT
+                Date, WeekLabel, YearMonth, Outlet, "Discount Name", Transaction,
+                Discount_Sales, Quantity,
+                CASE WHEN rn = 1 THEN COALESCE(ReceiptNet, 0.0) ELSE 0.0 END AS "Bill Sales"
+            FROM dedup
+        ), summary AS (
+            SELECT
+                Date, WeekLabel, YearMonth, Outlet, "Discount Name",
+                SUM(Discount_Sales) AS Discount_Sales,
+                COUNT(*) AS Quantity,
+                COUNT(DISTINCT Transaction) AS Transaction,
+                SUM("Bill Sales") AS "Bill Sales"
+            FROM with_bill
+            GROUP BY Date, WeekLabel, YearMonth, Outlet, "Discount Name"
+        ), with_brand AS (
+            SELECT s.*, bl.BrandGroup
+            FROM summary s
+            LEFT JOIN brand_lookup bl USING (Outlet)
+        ), outlet_totals AS (
+            SELECT Date, WeekLabel, YearMonth, Outlet,
+                SUM(Discount_Sales) AS total_sales,
+                SUM(Transaction) AS total_tx,
+                SUM(Quantity) AS total_qty
+            FROM with_brand
+            GROUP BY Date, WeekLabel, YearMonth, Outlet
+        ), ratios AS (
+            SELECT wb.*, ot.total_sales, ot.total_tx, ot.total_qty,
+                CASE WHEN ot.total_sales > 0 THEN (wb.Discount_Sales / ot.total_sales) * 100.0 ELSE 0.0 END AS "Discount Ratio",
+                CASE WHEN ot.total_tx > 0 THEN (wb.Transaction / ot.total_tx) * 100.0 ELSE 0.0 END AS "Transaction Ratio",
+                CASE WHEN ot.total_qty > 0 THEN (wb.Quantity / ot.total_qty) * 100.0 ELSE 0.0 END AS "Quantity Ratio"
+            FROM with_brand wb
+            LEFT JOIN outlet_totals ot USING (Date, WeekLabel, YearMonth, Outlet)
+        )
+        SELECT Date, WeekLabel, YearMonth, Outlet, "Discount Name",
+               Discount_Sales, Quantity, Transaction, "Bill Sales",
+               "Discount Ratio", "Transaction Ratio", "Quantity Ratio"
+        FROM ratios
+        """
+        df = self._exec_fetch_df(conn, sql)
+        conn.close()
+        if df is not None and not getattr(df, "empty", True):
+            try:
+                df = df[(
+                    df["Discount_Sales"].astype(float).gt(0)
+                    | df["Transaction"].astype(int).gt(0)
+                    | df["Bill Sales"].astype(float).gt(0)
+                )]
+                df = df[df["Discount Name"].astype(str).str.strip() != ""]
+            except Exception:
+                pass
+            if not store_brand_map.empty and "Outlet" in df.columns:
+                brand_lookup = (
+                    store_brand_map.drop_duplicates(subset=["store_name"]).rename(columns={"store_name": "Outlet"})
+                )
+                brand_df = df.merge(brand_lookup, on="Outlet", how="left")
+                brand_df = brand_df.dropna(subset=["BrandGroup"]) if "BrandGroup" in brand_df.columns else brand_df
+                if not brand_df.empty:
+                    grp_fields = ["Date", "WeekLabel", "YearMonth", "BrandGroup", "Discount Name"]
+                    brand_totals = (
+                        brand_df.groupby(grp_fields, as_index=False)
+                        .agg(
+                            Discount_Sales=("Discount_Sales", "sum"),
+                            Transaction=("Transaction", "sum"),
+                            **{"Bill Sales": ("Bill Sales", "sum")},
+                        )
+                    )
+                    brand_totals["Outlet"] = brand_totals["BrandGroup"].astype(str).map(lambda g: f"{g} All")
+                    brand_totals["Discount Ratio"] = 100.0
+                    brand_totals["Transaction Ratio"] = 100.0
+                    brand_totals.drop(columns=["BrandGroup"], inplace=True, errors="ignore")
+                    cols = [
+                        "Date",
+                        "WeekLabel",
+                        "YearMonth",
+                        "Outlet",
+                        "Discount Name",
+                        "Discount_Sales",
+                        "Transaction",
+                        "Bill Sales",
+                        "Discount Ratio",
+                        "Transaction Ratio",
+                    ]
+                    brand_totals = brand_totals[cols]
+                    df = pd.concat([df, brand_totals], ignore_index=True, sort=False)
+            return df
+        dfd = detail_frame.copy()
+        if dfd.empty:
             return pd.DataFrame(columns=columns)
-
-        discounts["Date"] = pd.to_datetime(discounts["c_date"], errors="coerce")
-        discounts["YearMonth"] = discounts["Date"].dt.to_period("M").astype(str)
-        discounts["WeekLabel"] = discounts["Date"].dt.strftime("%Y-W%V")
-        discounts["Outlet"] = discounts.get("store_name", pd.Series("", index=discounts.index, dtype="object")).astype(str)
-        discounts["Discount Name"] = discounts.get("disc_name", pd.Series("", index=discounts.index, dtype="object")).fillna("").astype(str)
-
-        if not receipt_totals.empty:
-            receipt_lookup = (
-                receipt_totals[["c_date", "store_name", "sales_no", "net_total"]]
-                .drop_duplicates()
-                .rename(columns={"net_total": "ReceiptNet"})
-            )
-            discounts = discounts.merge(
-                receipt_lookup,
-                left_on=["c_date", "store_name", "Transaction"],
-                right_on=["c_date", "store_name", "sales_no"],
-                how="left",
-            )
-            discounts.drop(columns=["sales_no"], inplace=True, errors="ignore")
-            discounts["Bill Sales"] = pd.to_numeric(discounts.get("ReceiptNet"), errors="coerce").fillna(0.0)
-            discounts.drop(columns=["ReceiptNet"], inplace=True, errors="ignore")
+        dfd["Date"] = pd.to_datetime(dfd["c_date"], errors="coerce")
+        dfd["YearMonth"] = dfd["Date"].dt.to_period("M").astype(str)
+        dfd["WeekLabel"] = dfd["Date"].dt.strftime("%Y-W%V")
+        dfd["Outlet"] = dfd.get("store_name", "").astype(str)
+        dfd["Discount Name"] = dfd.get("disc_name", "").astype(str).str.strip()
+        disc_amt = pd.to_numeric(dfd.get("disc_amt"), errors="coerce").fillna(0.0)
+        pro_disc_amt = pd.to_numeric(dfd.get("pro_disc_amt"), errors="coerce").fillna(0.0)
+        dfd["Discount_Sales"] = disc_amt + pro_disc_amt
+        dfd = dfd[(dfd["Discount Name"] != "") & (dfd["Discount_Sales"] > 0)]
+        dfd["Quantity"] = 1.0
+        dfd["Transaction"] = dfd.get("sales_no", "").astype(str)
+        rt = receipt_totals.copy()
+        if not rt.empty:
+            rt["Date"] = pd.to_datetime(rt["c_date"], errors="coerce")
+            rt["YearMonth"] = rt["Date"].dt.to_period("M").astype(str)
+            rt["WeekLabel"] = rt["Date"].dt.strftime("%Y-W%V")
+            rt_lookup = rt[["Date","YearMonth","WeekLabel","store_name","sales_no","net_total"]].rename(columns={"store_name":"Outlet","sales_no":"Transaction","net_total":"Bill Sales"})
+            dfd = dfd.merge(rt_lookup, on=["Date","YearMonth","WeekLabel","Outlet","Transaction"], how="left")
         else:
-            discounts["Bill Sales"] = 0.0
-
-        if not discounts.empty:
-            duplicate_mask = discounts.duplicated(
-                subset=["Date", "WeekLabel", "YearMonth", "Outlet", "Discount Name", "Transaction"]
-            )
-            if duplicate_mask.any():
-                discounts.loc[duplicate_mask, "Bill Sales"] = 0.0
-
-        express_mask = discounts.get("source_database", pd.Series("", index=discounts.index, dtype="object")).astype(str).eq("sushi_express_pos_live")
-        discounts.loc[express_mask, "Quantity"] = 1.0
-
+            dfd["Bill Sales"] = 0.0
         summary = (
-            discounts.groupby(["Date", "WeekLabel", "YearMonth", "Outlet", "Discount Name"], as_index=False)
-            .agg(
-                Discount_Sales=("Discount_Sales", "sum"),
-                Quantity=("Quantity", "sum"),
-                Transaction=("Transaction", "nunique"),
-                Bill_Sales=("Bill Sales", "sum"),
-            )
+            dfd.groupby(["Date","WeekLabel","YearMonth","Outlet","Discount Name"], as_index=False)
+            .agg(Discount_Sales=("Discount_Sales","sum"), Transaction=("Transaction","nunique"), **{ "Bill Sales": ("Bill Sales","sum") })
         )
-
-        brand_lookup = (
-            store_brand_map.drop_duplicates(subset=["store_name"]).rename(columns={"store_name": "Outlet"})
+        outlet_totals = (
+            summary.groupby(["Date","WeekLabel","YearMonth","Outlet"], as_index=False)
+            .agg(total_sales=("Discount_Sales","sum"), total_tx=("Transaction","sum"))
         )
-        summary = summary.merge(brand_lookup, on="Outlet", how="left")
-
-        outlet_totals = summary.groupby(["Date", "WeekLabel", "YearMonth", "Outlet"], as_index=False).agg(
-            total_sales=("Discount_Sales", "sum"),
-            total_tx=("Transaction", "sum"),
-            total_qty=("Quantity", "sum"),
-        )
-        summary = summary.merge(outlet_totals, on=["Date", "WeekLabel", "YearMonth", "Outlet"], how="left")
-        summary["Discount Ratio"] = np.where(
-            summary["total_sales"].gt(0),
-            (summary["Discount_Sales"] / summary["total_sales"]) * 100.0,
-            0.0,
-        )
-        summary["Transaction Ratio"] = np.where(
-            summary["total_tx"].gt(0),
-            (summary["Transaction"] / summary["total_tx"]) * 100.0,
-            0.0,
-        )
-        summary["Quantity Ratio"] = np.where(
-            summary["total_qty"].gt(0),
-            (summary["Quantity"] / summary["total_qty"]) * 100.0,
-            0.0,
-        )
-        summary.drop(columns=["total_sales", "total_tx", "total_qty"], inplace=True)
-
-        brand_summary = (
-            summary.dropna(subset=["BrandGroup"])
-            .groupby(["Date", "WeekLabel", "YearMonth", "BrandGroup", "Discount Name"], as_index=False)
-            .agg(
-                Discount_Sales=("Discount_Sales", "sum"),
-                Quantity=("Quantity", "sum"),
-                Transaction=("Transaction", "sum"),
-                Bill_Sales=("Bill_Sales", "sum"),
-            )
-        )
-
-        brand_period_totals = (
-            summary.dropna(subset=["BrandGroup"])
-            .groupby(["Date", "WeekLabel", "YearMonth", "BrandGroup"], as_index=False)
-            .agg(
-                period_sales=("Discount_Sales", "sum"),
-                period_tx=("Transaction", "sum"),
-                period_qty=("Quantity", "sum"),
-                period_bill_sales=("Bill_Sales", "sum"),
-            )
-        )
+        summary = summary.merge(outlet_totals, on=["Date","WeekLabel","YearMonth","Outlet"], how="left")
+        summary["Discount Ratio"] = np.where(summary["total_sales"].gt(0),(summary["Discount_Sales"]/summary["total_sales"])*100.0,0.0)
+        summary["Transaction Ratio"] = np.where(summary["total_tx"].gt(0),(summary["Transaction"]/summary["total_tx"])*100.0,0.0)
+        summary.drop(columns=["total_sales","total_tx"], inplace=True)
+        try:
+            summary = summary[(
+                summary["Discount_Sales"].astype(float).gt(0)
+                | summary["Transaction"].astype(int).gt(0)
+                | summary["Bill Sales"].astype(float).gt(0)
+            )]
+            summary = summary[summary["Discount Name"].astype(str).str.strip() != ""]
+        except Exception:
+            pass
+        if not store_brand_map.empty:
+            brand_lookup = store_brand_map.drop_duplicates(subset=["store_name"]).rename(columns={"store_name": "Outlet"})
+            brand_df = summary.merge(brand_lookup, on="Outlet", how="left")
+            brand_df = brand_df.dropna(subset=["BrandGroup"]) if "BrandGroup" in brand_df.columns else brand_df
+            if not brand_df.empty:
+                grp_fields = ["Date", "WeekLabel", "YearMonth", "BrandGroup", "Discount Name"]
+                brand_totals = (
+                    brand_df.groupby(grp_fields, as_index=False)
+                    .agg(
+                        Discount_Sales=("Discount_Sales", "sum"),
+                        Transaction=("Transaction", "sum"),
+                        **{"Bill Sales": ("Bill Sales", "sum")},
+                    )
+                )
+                brand_totals["Outlet"] = brand_totals["BrandGroup"].astype(str).map(lambda g: f"{g} All")
+                brand_totals["Discount Ratio"] = 100.0
+                brand_totals["Transaction Ratio"] = 100.0
+                brand_totals.drop(columns=["BrandGroup"], inplace=True, errors="ignore")
+                cols = [
+                    "Date",
+                    "WeekLabel",
+                    "YearMonth",
+                    "Outlet",
+                    "Discount Name",
+                    "Discount_Sales",
+                    "Transaction",
+                    "Bill Sales",
+                    "Discount Ratio",
+                    "Transaction Ratio",
+                ]
+                brand_totals = brand_totals[cols]
+                summary = pd.concat([summary, brand_totals], ignore_index=True, sort=False)
+        return summary
 
         brand_summary = brand_summary.merge(
             brand_period_totals,
@@ -3887,7 +3279,7 @@ class DataRepository(QtCore.QObject):
 
     def _format_discount_period(self, summary: pd.DataFrame, mode: str) -> pd.DataFrame:
         columns = DISCOUNT_ANALYSIS_COLUMNS.get(mode, [])
-        if summary.empty:
+        if summary is None or getattr(summary, "empty", True):
             return pd.DataFrame(columns=columns)
 
         frame = summary.copy()
@@ -3905,25 +3297,21 @@ class DataRepository(QtCore.QObject):
             frame.groupby(grouping, as_index=False)
             .agg(
                 Discount_Sales=("Discount_Sales", "sum"),
-                Quantity=("Quantity", "sum"),
                 Transaction=("Transaction", "sum"),
                 Bill_Sales=("Bill Sales", "sum"),
                 DiscountRatio=("Discount Ratio", "mean"),
                 TransactionRatio=("Transaction Ratio", "mean"),
-                QuantityRatio=("Quantity Ratio", "mean"),
             )
         )
 
         aggregated["Discount Sales"] = aggregated["Discount_Sales"].round(1)
-        aggregated["Quantity"] = aggregated["Quantity"].round(1)
         aggregated["Transaction"] = aggregated["Transaction"].astype(int)
         aggregated["Bill Sales"] = aggregated["Bill_Sales"].round(1)
         aggregated["Discount Ratio %"] = aggregated["DiscountRatio"].round(2).map(lambda value: f"{value:.2f}%")
         aggregated["Transaction Ratio %"] = aggregated["TransactionRatio"].round(2).map(lambda value: f"{value:.2f}%")
-        aggregated["Quantity Ratio %"] = aggregated["QuantityRatio"].round(2).map(lambda value: f"{value:.2f}%")
 
         aggregated.drop(
-            columns=["Discount_Sales", "Bill_Sales", "DiscountRatio", "TransactionRatio", "QuantityRatio"],
+            columns=["Discount_Sales", "Bill_Sales", "DiscountRatio", "TransactionRatio"],
             inplace=True,
         )
 
@@ -4087,6 +3475,11 @@ class MultiSelectFilter(QtWidgets.QWidget):
         self._reset_search()
 
     def selections(self) -> List[str]:
+        try:
+            if self._all_item is not None and self._all_item.checkState() == QtCore.Qt.CheckState.Checked:
+                return []
+        except Exception:
+            pass
         values = [value for value in self._selected if value != self._all_entry]
         return values
 
@@ -4932,7 +4325,11 @@ class SalesTransactionView(QtWidgets.QWidget):
         self.summary_label.setText(
             f"Rows: {rows:,} | Receipts: {unique_receipts:,} | Nett Sales: $ {net_total:,.1f}"
         )
-        self.table.resizeColumnsToContents()
+        try:
+            if rows <= 2000:
+                self.table.resizeColumnsToContents()
+        except Exception:
+            pass
         self._update_header_summaries()
 
     def _connect_selection(self) -> None:
@@ -5154,7 +4551,11 @@ class SalesTransactionReportTab(QtWidgets.QWidget):
 
         self.payment_model.set_header_overrides(headers)
 
-        self.payment_view.resizeColumnsToContents()
+        try:
+            if row_count <= 2000:
+                self.payment_view.resizeColumnsToContents()
+        except Exception:
+            pass
 
     def update_discount_analysis(self, df: pd.DataFrame) -> None:
         self.discount_model.set_frame(df)
@@ -5210,18 +4611,16 @@ class SalesTransactionReportTab(QtWidgets.QWidget):
 
         discount_total = _sum_numeric(frame.get("Discount Sales"))
         bill_sales_total = _sum_numeric(frame.get("Bill Sales"))
-        quantity_total = _sum_numeric(frame.get("Quantity"))
         transaction_total = _sum_numeric(frame.get("Transaction"))
 
         self.discount_summary_label.setText(
             (
                 "Rows: {rows:,} | Discount Sales: $ {sales:,.1f} | Bill Sales: $ {bill:,.1f} | "
-                "Quantity: {qty:,.0f} | Transactions: {txn:,.0f}"
+                "Transactions: {txn:,.0f}"
             ).format(
                 rows=row_count,
                 sales=discount_total,
                 bill=bill_sales_total,
-                qty=quantity_total,
                 txn=transaction_total,
             )
         )
@@ -5265,7 +4664,11 @@ class SalesTransactionReportTab(QtWidgets.QWidget):
                 headers[col] = f"{col}\n{total:,.1f}"
 
         self.discount_model.set_header_overrides(headers)
-        self.discount_view.resizeColumnsToContents()
+        try:
+            if row_count <= 2000:
+                self.discount_view.resizeColumnsToContents()
+        except Exception:
+            pass
 
 
 class PromotionAnalysisTab(QtWidgets.QWidget):
@@ -5640,7 +5043,11 @@ class ProductDataReportTab(QtWidgets.QWidget):
             headers[col] = f"{col}\n{value_text}"
 
         self.product_model.set_header_overrides(headers)
-        self.product_view.resizeColumnsToContents()
+        try:
+            if row_count <= 2000:
+                self.product_view.resizeColumnsToContents()
+        except Exception:
+            pass
 
 
 class ActivityRecordTableModel(QtCore.QAbstractTableModel):
@@ -5751,7 +5158,6 @@ class FilterPanel(QtWidgets.QGroupBox):
         self.layout().setContentsMargins(8, 8, 8, 8)
         self.layout().setSpacing(8)
 
-        # Create payment view toggles
         toggles_widget = QtWidgets.QWidget()
         toggles_layout = QtWidgets.QHBoxLayout(toggles_widget)
         toggles_layout.setContentsMargins(0, 0, 0, 0)
@@ -5801,10 +5207,11 @@ class FilterPanel(QtWidgets.QGroupBox):
         date_layout.setContentsMargins(0, 0, 0, 0)
         date_layout.setSpacing(6)
 
-        self.date_range = DateRangePicker(minimum=date(1900, 1, 1))
         today = QtCore.QDate.currentDate()
         first_of_month = QtCore.QDate(today.year(), today.month(), 1)
-        self.date_range.set_range(first_of_month.toPyDate(), today.toPyDate())
+        yesterday = today.addDays(-1)
+        self.date_range = DateRangePicker(minimum=date(1900, 1, 1))
+        self.date_range.set_range(first_of_month.toPyDate(), yesterday.toPyDate())
         self.date_range.range_changed.connect(self._on_filter_modified)
 
         date_layout.addWidget(QtWidgets.QLabel("Date Range"))
@@ -5858,8 +5265,10 @@ class FilterPanel(QtWidgets.QGroupBox):
         self._filters_dirty = False
         self._emit_payment_options()
 
-        # Track last date range to avoid redundant callbacks when we adjust dates programmatically
-        self._last_date_range: Tuple[date, date] = self.date_range.current_range()
+        self._filters_debounce = QtCore.QTimer(self)
+        self._filters_debounce.setSingleShot(True)
+        self._filters_debounce.setInterval(150)
+        self._filters_debounce.timeout.connect(self._emit_changes)
 
     def populate(self, options: Dict[str, List[str]], *, emit: bool = False) -> None:
         self.outlet_filter.set_options(options.get("outlets", []), maintain=True)
@@ -5895,14 +5304,18 @@ class FilterPanel(QtWidgets.QGroupBox):
         )
 
     def _on_filter_modified(self, *_: object) -> None:
-        self._emit_changes()
+        if self._filters_debounce.isActive():
+            self._filters_debounce.stop()
+        self._filters_debounce.start()
 
     def _on_weekday_changed(self, _values: List[int]) -> None:
         del _values
         self._state = self._gather_state()
         self._filters_dirty = False
         self.apply_button.setEnabled(False)
-        self.filters_changed.emit(self._state)
+        if self._filters_debounce.isActive():
+            self._filters_debounce.stop()
+        self._filters_debounce.start()
 
     def current_state(self) -> FilterState:
         return self._state
@@ -5915,12 +5328,7 @@ class FilterPanel(QtWidgets.QGroupBox):
         self._emit_changes()
 
     def _emit_changes(self) -> None:
-        state = self._gather_state()
-        if self._adjust_date_range_if_needed(state):
-            state = self._gather_state()
-
-        self._state = state
-        self._last_date_range = (state.date_from, state.date_to)
+        self._state = self._gather_state()
         self.filters_changed.emit(self._state)
         self._filters_dirty = False
         self.apply_button.setEnabled(False)
@@ -5951,7 +5359,6 @@ class FilterPanel(QtWidgets.QGroupBox):
         self.discount_filter.set_selections(state.discounts)
         self.brand_filter.set_selections(state.brands)
         self.weekday_selector.set_selected_weekdays(state.weekdays)
-        self._last_date_range = self.date_range.current_range()
         self._emit_changes()
 
     def current_payment_options(self) -> PaymentDisplayOptions:
@@ -5971,70 +5378,11 @@ class FilterPanel(QtWidgets.QGroupBox):
             opts.period_mode,
         )
 
-    def _adjust_date_range_if_needed(self, state: FilterState) -> bool:
-        if "sushi_epoint_pos_live" not in state.brands:
-            return False
-
-        available = _epoint_available_range()
-        if available is None:
-            return False
-        return False
-
-
-class ActivityRecordTableModel(QtCore.QAbstractTableModel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._records = []
-
-    def set_records(self, records):
-        self._records = records
-        self.layoutChanged.emit()
-
-    def rowCount(self, parent=None):
-        return len(self._records)
-
-    def columnCount(self, parent=None):
-        return 5  # Assuming 5 columns
-
-    def data(self, index, role=QtCore.Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
-            return None
-        record = self._records[index.row()]
-        if role == QtCore.Qt.ItemDataRole.DisplayRole:
-            # Return the data for the given column
-            if index.column() == 0:
-                return record.name
-            elif index.column() == 1:
-                return record.date
-            elif index.column() == 2:
-                return record.category
-            elif index.column() == 3:
-                return record.product
-            elif index.column() == 4:
-                return record.discount
-        return None
-
-    def headerData(self, section, orientation, role=QtCore.Qt.ItemDataRole.DisplayRole):
-        if role == QtCore.Qt.ItemDataRole.DisplayRole:
-            if orientation == QtCore.Qt.Orientation.Horizontal:
-                # Return the header for the given column
-                if section == 0:
-                    return "Name"
-                elif section == 1:
-                    return "Date"
-                elif section == 2:
-                    return "Category"
-                elif section == 3:
-                    return "Product"
-                elif section == 4:
-                    return "Discount"
-        return None
-
 
 class ActivityLogTab(QtWidgets.QWidget):
-    record_add_requested = QtCore.pyqtSignal(object)  # Emits ActivityRecord
-    record_apply_requested = QtCore.pyqtSignal(object)  # Emits ActivityRecord
-    record_delete_requested = QtCore.pyqtSignal(str)  # Emits record ID
+    record_add_requested = QtCore.pyqtSignal(object)
+    record_apply_requested = QtCore.pyqtSignal(object)
+    record_delete_requested = QtCore.pyqtSignal(str)
     promotion_filters_changed = QtCore.pyqtSignal(FilterState)
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
@@ -6178,12 +5526,15 @@ class ActivityLogTab(QtWidgets.QWidget):
     # ------------------------------------------------------------------
     # Form helpers
     # ------------------------------------------------------------------
-    def _set_default_dates(self) -> None:
-        # Use default current month for activity log
+    def _default_date_range(self) -> Tuple[QtCore.QDate, QtCore.QDate]:
         today = QtCore.QDate.currentDate()
         start = QtCore.QDate(today.year(), today.month(), 1)
-        yesterday = today.addDays(-1)
-        self.date_range.set_range(start.toPyDate(), yesterday.toPyDate())
+        end = today.addDays(-1)
+        return start, end
+
+    def _set_default_dates(self) -> None:
+        start_qdate, end_qdate = self._default_date_range()
+        self.date_range.set_range(start_qdate.toPyDate(), end_qdate.toPyDate())
 
     def update_filter_options(self, options: Dict[str, List[str]]) -> None:
         self.outlet_filter.set_options(options.get("outlets", []), maintain=True)
@@ -6239,9 +5590,7 @@ class ActivityLogTab(QtWidgets.QWidget):
             if record.id == record_id:
                 index = self.records_model.index(row, 0)
                 self.records_view.selectionModel().select(
-                    index, 
-                    QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect | 
-                    QtCore.QItemSelectionModel.SelectionFlag.Select
+                    index, QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect | QtCore.QItemSelectionModel.SelectionFlag.Rows
                 )
                 self.records_view.scrollTo(index)
                 self._load_record(record)
@@ -6571,6 +5920,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._search_debounce.setInterval(250)
         self._search_debounce.timeout.connect(self._apply_search_text)
 
+        self._active_cached_generation = 0
+        self._cached_task_running = False
+        self._queued_cached_state: Optional[FilterState] = None
+
         self._init_ui()
         if HAS_FLUENT and Theme is not None:
             self._apply_theme_scheme(self._current_theme_key)
@@ -6591,8 +5944,6 @@ class MainWindow(QtWidgets.QMainWindow):
         central_layout.setSpacing(8)
 
         self.filter_panel = FilterPanel()
-        date_range = self._default_date_range()
-        self.filter_panel.date_range.set_range(date_range[0], date_range[1])
         self.filter_panel.filters_changed.connect(self._on_filters_changed)
         self.filter_panel.payment_options_changed.connect(self._on_payment_options_changed)
         central_layout.addWidget(self.filter_panel)
@@ -6741,6 +6092,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _load_filters(self) -> None:
         if self._cached_filter_options:
             self.filter_panel.populate(self._cached_filter_options, emit=False)
+            self.filter_panel.apply_button.setEnabled(False)
+            return
         if self._options_refresh_pending:
             return
         self._options_refresh_pending = True
@@ -6787,25 +6140,9 @@ class MainWindow(QtWidgets.QMainWindow):
             start_date=start_date if single_day is None else single_day,
             end_date=end_date if single_day is None else single_day,
         )
-
-    def _default_date_range(self) -> Tuple[date, date]:
-        today = QtCore.QDate.currentDate().toPyDate()
-        yesterday = (QtCore.QDate.currentDate().addDays(-1)).toPyDate()
-        default_range = (date(today.year, today.month, 1), yesterday)
-
-        available = _epoint_available_range()
-        if available is None:
-            return default_range
-
-        if _ranges_overlap(default_range, available):
-            adj_start = max(default_range[0], available[0])
-            adj_end = min(default_range[1], available[1])
-            if adj_start <= adj_end:
-                return (adj_start, adj_end)
-
-        fallback_end = available[1]
-        fallback_start = date(fallback_end.year, fallback_end.month, 1)
-        return (fallback_start, fallback_end)
+        task.signals.finished.connect(partial(self._handle_sync_finished, generation=None))
+        task.signals.failed.connect(self._handle_sync_failed)
+        self._thread_pool.start(task)
 
     def _on_filters_changed(self, state: FilterState) -> None:
         if self._state_equal_except_weekdays(self._current_filter_state, state):
@@ -6938,11 +6275,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Remote sync completed.")
         self._sync_in_progress = False
         self.report_tabs.sales_transaction_view.set_status("Sync completed. Refreshing data…")
-        self.repository.invalidate_caches()
-        # Refresh filters asynchronously to avoid blocking the UI.
-        QtCore.QTimer.singleShot(0, self._load_filters)
+        if not self._cached_filter_options and not self._options_refresh_pending:
+            QtCore.QTimer.singleShot(0, self._load_filters)
         if self._current_filter_state is not None:
-            self._refresh_sales_transactions(self._current_filter_state)
+            if self._active_fetch_generation == 0:
+                if self._base_cache_covers(self._current_filter_state):
+                    self._log("[FILTER] Reusing cached base after sync.")
+                    self._refresh_from_cached_base(self._current_filter_state)
+                else:
+                    self._refresh_sales_transactions(self._current_filter_state)
         self._refresh_activity_records()
 
     def _handle_sync_failed(self, exc: Exception) -> None:
@@ -6961,8 +6302,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_fetch_generation += 1
             generation = self._active_fetch_generation
             self._log(f"Starting data refresh (generation {generation})")
-
-            task = BackgroundTask(self.repository.fetch_sales_transactions, current_state)
+            fetch_state = FilterState(
+                date_from=current_state.date_from,
+                date_to=current_state.date_to,
+                outlets=[],
+                months=[],
+                weeks=[],
+                payments=[],
+                categories=[],
+                products=[],
+                brands=[],
+                discounts=[],
+                weekdays=current_state.weekdays,
+            )
+            task = BackgroundTask(self.repository.fetch_sales_transactions, fetch_state)
             task.signals.finished.connect(
                 partial(self._handle_sales_data, generation=generation)
             )
@@ -6973,7 +6326,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self._log("[FILTER] Reusing cached base data for non-date filter update.")
-        self._refresh_from_cached_base(current_state)
+        self._refresh_from_cached_base_async(current_state)
 
     def _base_cache_covers(self, state: FilterState) -> bool:
         if self._base_details_df.empty:
@@ -7094,6 +6447,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_product_analysis_display()
         self._update_promotion_analysis_display()
         self._apply_search_text()
+
+    def _refresh_from_cached_base_async(self, state: FilterState) -> None:
+        if self._base_details_df.empty:
+            self._refresh_sales_transactions(state)
+            return
+        filtered_detail, filtered_payments = DataRepository._filter_sales_frames(
+            self._base_details_df, self._base_payments_df, state
+        )
+        if filtered_detail.empty or filtered_payments.empty:
+            self._refresh_from_cached_base(state)
+            return
+        if self._cached_task_running:
+            self._queued_cached_state = state
+            return
+        self._cached_task_running = True
+        self._active_cached_generation += 1
+        generation = self._active_cached_generation
+        task = BackgroundTask(
+            self.repository._assemble_sales_report,
+            filtered_detail,
+            filtered_payments,
+            base_details=self._base_details_df.copy(),
+            base_payments=self._base_payments_df.copy(),
+            base_state=self._base_filter_state,
+            state=state,
+        )
+        task.signals.finished.connect(partial(self._handle_cached_finished, generation=generation, state=state))
+        task.signals.failed.connect(self._handle_sync_failed)
+        self._thread_pool.start(task)
+
+    def _handle_cached_finished(self, result: SalesReportFrames, generation: int, state: FilterState) -> None:
+        if generation != self._active_cached_generation:
+            return
+        formatted_details = self._format_sales_dataframe(result.details)
+        self.report_tabs.sales_transaction_report.details_view.update_data(formatted_details)
+        if formatted_details.empty:
+            self.report_tabs.sales_transaction_report.details_view.set_status("No data found for current filters.")
+        else:
+            self.report_tabs.sales_transaction_view.set_status(
+                f"Loaded {len(formatted_details):,} detail rows."
+            )
+        self._latest_details_df = formatted_details.copy()
+        self._latest_payment_df = {mode: df.copy() for mode, df in result.payment_analysis.items()}
+        self._latest_discount_df = {mode: df.copy() for mode, df in result.discount_analysis.items()}
+        self._latest_product_df = {mode: df.copy() for mode, df in result.product_analysis.items()}
+        self._latest_promotion_df = {mode: df.copy() for mode, df in result.promotion_analysis.items()}
+        self._latest_store_brand_map = result.store_brand_map.copy(deep=True)
+        self._latest_active_store_counts = dict(result.active_store_counts)
+        self._update_payment_analysis_display()
+        self._update_discount_analysis_display()
+        self._update_product_analysis_display()
+        self._update_promotion_analysis_display()
+        self._apply_search_text()
+        self._cached_task_running = False
+        if self._queued_cached_state is not None:
+            queued = self._queued_cached_state
+            self._queued_cached_state = None
+            QtCore.QTimer.singleShot(0, partial(self._refresh_from_cached_base_async, queued))
 
     def _merge_promotion_filters(self, base_state: FilterState) -> FilterState:
         promo_state = self._current_promotion_state
@@ -7356,7 +6767,7 @@ class MainWindow(QtWidgets.QMainWindow):
         date_from: Optional[date],
         date_to: Optional[date],
     ) -> Optional[BrandCacheEntry]:
-        """Load raw sales and payment data from Epoint parquet files.
+        """Load raw sales and payment data from Epoint DuckDB files.
         
         Args:
             db_name: Name of the database (should be 'sushi_epoint_pos_live')
@@ -7372,72 +6783,80 @@ class MainWindow(QtWidgets.QMainWindow):
         # Check if we have this data cached in memory
         with self._brand_cache_lock:
             if cache_key in self._brand_raw_cache:
-                return self._brand_raw_cache[cache_key]
+                entry = self._brand_raw_cache[cache_key]
+                if entry.date_from == date_from and entry.date_to == date_to:
+                    return entry
 
         try:
-            # Get the parquet directory
-            parquet_dir = Path(".pos_cache") / db_name
-            
-            # Find all parquet files
-            detail_files = list(parquet_dir.glob("pos_*_details.parquet"))
-            payment_files = list(parquet_dir.glob("pos_*_payments.parquet"))
-            
-            if not detail_files or not payment_files:
-                self.log_message.emit("No Epoint data files found")
+            # Connect to the main Epoint database
+            db_path = cache_paths.duckdb_path
+            if not os.path.exists(db_path):
+                self.log_message.emit(f"Epoint database not found at {db_path}")
                 return None
 
-            # Load details data
-            all_details = []
-            for file in detail_files:
-                try:
-                    df = pd.read_parquet(file)
-                    if "c_date" in df.columns:
-                        df["c_date"] = pd.to_datetime(df["c_date"], errors="coerce")
-                        if date_from:
-                            df = df[df["c_date"].dt.date >= date_from]
-                        if date_to:
-                            df = df[df["c_date"].dt.date <= date_to]
-                        all_details.append(df)
-                except Exception as e:
-                    self.log_message.emit(f"Error loading {file.name}: {str(e)}")
+            conn = duckdb.connect(str(db_path), read_only=True)
+            
+            # Build date filter
+            date_conditions = []
+            params: Dict[str, object] = {}
+            if date_from:
+                date_conditions.append("c_date >= %(date_from)s")
+                params["date_from"] = date_from.isoformat()
+                
+            if date_to:
+                date_conditions.append("c_date <= %(date_to)s")
+                params["date_to"] = date_to.isoformat()
+                
+            date_filter = " AND ".join(date_conditions) if date_conditions else "1=1"
 
+            # Load details data - using item_name as item_no for compatibility
+            details_query = f"""
+                SELECT 
+                    c_date,
+                    store_name,
+                    sales_no,
+                    item_name AS item_no,  -- Map item_name to item_no for compatibility
+                    item_name,
+                    '' AS category_code,   -- Epoint may not have categories
+                    qty,
+                    sub_total,
+                    disc_name,
+                    disc_amt,
+                    pro_disc_amt,
+                    svc_amt,
+                    tax_amt,
+                    '' AS take_away_item,  -- Epoint may not have this field
+                    item_sub_total,
+                    payment_methods,
+                    '{db_name}' AS source_database
+                FROM raw_details
+                WHERE {date_filter}
+            """
+            details = conn.execute(details_query, params).fetchdf()
+            
             # Load payments data
-            all_payments = []
-            for file in payment_files:
-                try:
-                    df = pd.read_parquet(file)
-                    if "c_date" in df.columns:
-                        df["c_date"] = pd.to_datetime(df["c_date"], errors="coerce")
-                        if date_from:
-                            df = df[df["c_date"].dt.date >= date_from]
-                        if date_to:
-                            df = df[df["c_date"].dt.date <= date_to]
-                        all_payments.append(df)
-                except Exception as e:
-                    self.log_message.emit(f"Error loading {file.name}: {str(e)}")
-
-            # Combine all data
-            details = pd.concat(all_details, ignore_index=True) if all_details else pd.DataFrame()
-            payments = pd.concat(all_payments, ignore_index=True) if all_payments else pd.DataFrame()
+            payments_query = f"""
+                SELECT DISTINCT
+                    c_date,
+                    store_name,
+                    sales_no,
+                    '{db_name}' AS source_database,
+                    payment_name,
+                    tender_amt AS tender_amount
+                FROM raw_payments
+                WHERE {date_filter}
+            """
+            payments = conn.execute(payments_query, params).fetchdf()
+            
+            conn.close()
             
             if details.empty or payments.empty:
                 self.log_message.emit("No data found for the selected date range")
                 return None
-            
-            # Standardize column names for compatibility
-            details_df = details.copy()
-            
-            # Add missing columns with default values
-            for col in ["category_code", "take_away_item"]:
-                if col not in details_df.columns:
-                    details_df[col] = ""
-            
-            # Ensure source_database is set
-            details_df["source_database"] = db_name
-            
+                
             # Create cache entry
             entry = BrandCacheEntry(
-                detail=details_df,
+                detail=details,
                 payments=payments,
                 date_from=date_from,
                 date_to=date_to,
@@ -7448,7 +6867,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._brand_raw_cache[cache_key] = entry
                 
             return entry
-                
+            
         except Exception as e:
             self.log_message.emit(f"Error loading Epoint data: {str(e)}")
             import traceback
@@ -7490,43 +6909,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 date_filter = " AND ".join(date_conditions) if date_conditions else "1=1"
 
                 # Load details
-                # For Epoint, we need to join with stock master to get sales_category
-                if db_name == 'sushi_epoint_pos_live':
-                    # Load stock master data
-                    stock_df = pd.read_excel(
-                        'Stock master Total.xlsx',
-                        usecols=['STOCK', 'AC_GROUP']
-                    ).dropna(subset=['STOCK', 'AC_GROUP'])
-                    stock_df = stock_df.rename(
-                        columns={'STOCK': 'stock_code', 'AC_GROUP': 'sales_category'}
-                    )
-                    stock_df['stock_code'] = stock_df['stock_code'].astype(str).str.strip()
-                    stock_df['sales_category'] = (
-                        stock_df['sales_category'].astype(str).str.strip().str.upper()
-                    )
-                    conn.register('stock_master', stock_df)
-                    
-                    # Query with stock master join
-                    details_query = f"""
-                        SELECT s.*, sm.sales_category
-                        FROM v_sales_clean s
-                        LEFT JOIN stock_master sm
-                            ON TRIM(s.item_name) = sm.stock_code
-                        WHERE {date_filter}
-                    """
-                else:
-                    # Regular query for non-Epoint brands
-                    details_query = f"""
-                        SELECT * FROM v_sales_clean
-                        WHERE {date_filter}
-                    """
-                
+                details_query = f"""
+                    SELECT * FROM vw_clean_details
+                    WHERE {date_filter}
+                """
                 details = conn.execute(details_query, params).fetchdf()
 
                 # Load payments
                 payments_query = f"""
-                    SELECT * FROM v_payment_alloc
-                    WHERE sales_no IN (SELECT DISTINCT sales_no FROM v_sales_clean WHERE {date_filter})
+                    SELECT * FROM vw_clean_payments
+                    WHERE sales_no IN (SELECT DISTINCT sales_no FROM vw_clean_details WHERE {date_filter})
                 """
                 payments = conn.execute(payments_query, params).fetchdf()
 
@@ -7557,25 +6949,12 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> Optional[BrandCacheEntry]:
         """Load raw sales and payment data for a specific brand.
 
-        This method uses the DataRepository to load data.
+        This method routes to the appropriate loader based on the database type.
         """
-        try:
-            # Use the DataRepository to load the data
-            raw_frames = self.data_repository._load_brand_raw_frames(db_name, date_from, date_to)
-            
-            # Create cache entry
-            entry = BrandCacheEntry(
-                raw_frames.detail,
-                raw_frames.payments,
-                date_from,
-                date_to
-            )
-            
-            return entry
-            
-        except Exception as e:
-            self.log_message.emit(f"Error loading {db_name} data: {e}")
-            return None
+        if db_name == "sushi_epoint_pos_live":
+            return self._load_epoint_raw_frames(db_name, date_from, date_to)
+        else:
+            return self._load_sql_raw_frames(db_name, date_from, date_to)
 
     def _style_xlsxwriter(
         self,
@@ -7846,10 +7225,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_product_analysis_display()
 
     def _selected_day_count(self) -> int:
-        if self._current_filter_state and self._current_filter_state.date_from and self._current_filter_state.date_to:
-            return (self._current_filter_state.date_to - self._current_filter_state.date_from).days + 1
+        state = self._current_filter_state
+        if state and state.date_from and state.date_to:
+            start = state.date_from
+            end = state.date_to
+            total = (end - start).days + 1
+            if state.weekdays:
+                selected = set(int(x) for x in state.weekdays)
+                count = 0
+                for i in range(total):
+                    d = start + timedelta(days=i)
+                    if d.weekday() in selected:
+                        count += 1
+                return max(count, 1)
+            return max(total, 1)
         if not self._latest_details_df.empty:
-            unique_dates = pd.to_datetime(self._latest_details_df["Date"], errors="coerce").dt.normalize().nunique()
+            dates = pd.to_datetime(self._latest_details_df["Date"], errors="coerce").dt.normalize()
+            if state and state.weekdays:
+                wk = dates.dt.weekday
+                mask = wk.isin([int(x) for x in state.weekdays])
+                return int(dates[mask].nunique()) if mask.any() else 1
+            unique_dates = dates.nunique()
             return int(unique_dates) if unique_dates else 1
         return 1
 
@@ -7938,7 +7334,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             day_count = max(self._selected_day_count(), 1)
             if day_count > 1:
-                for column in ("Discount Sales", "Quantity", "Transaction"):
+                for column in ("Discount Sales", "Transaction"):
                     if column in frame.columns:
                         numeric = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
                         frame[column] = numeric.div(day_count).round(1)
@@ -7949,7 +7345,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 counts = (
                     frame.loc[total_mask, "Outlet"].map(lambda label: max(self._selected_outlet_count(label), 1)).astype(float)
                 )
-                for column, precision in (("Discount Sales", 1), ("Quantity", 1), ("Transaction", 1)):
+                for column, precision in (("Discount Sales", 1), ("Transaction", 1)):
                     if column in frame.columns:
                         values = pd.to_numeric(frame.loc[total_mask, column], errors="coerce").fillna(0.0)
                         frame.loc[total_mask, column] = (values / counts).round(precision)
@@ -8165,68 +7561,19 @@ QScrollBar::handle:horizontal {{
 
         frame = df.copy()
         frame["Date"] = pd.to_datetime(frame["c_date"], errors="coerce").dt.date
-        # Apply outlet name mapping for Epoint data
-        outlet_mapping = {
-            "204": "204- WEST GATE",
-            "206": "206- SELETAR MALL",
-            "207": "207- SERANGOON NEX",
-            "208": "208- SUN PLAZA",
-            "209": "209- IMM MALL",
-            "211": "211- WHITE SANDS",
-            "212": "212- JURONG POINT",
-            "214": "214- HILLION MALL",
-            "215": "215- HEARTLAND MALL",
-            "216": "216- WATERWAY POINT",
-            "217": "217- HEARTBEAT BEDOK",
-            "218": "218- NORTHPOINT CITY",
-            "221": "221- FUNAN",
-            "222": "222- PAYA LEBAR QUARTER",
-            "223": "223- HOUGANG MALL",
-            "224": "224- PARKWAY PARADE",
-            "225": "225- CLEMENTI MALL",
-            "226": "226- CENTURY SQUARE",
-            "227": "227- SENGKANG GRAND",
-            "228": "228- WEST MALL",
-            "229": "229- PARKWAY PARADE 2",
-            "301": "301 - WOODLAND",
-            "302": "302 - GRANTRAL MALL",
-            "303": "303 - TAMPINES",
-            "304": "304 - TOA PAYOH",
-            "306": "306 - J8",
-            "307": "307 - HGTO",
-            "308": "308 - OASIS",
-            "309": "309 - YEW TEE SQUARE",
-            "310": "310 - SENGKANG MRT",
-            "311": "311 - THE POIZ CENTRE",
-            "312": "312 - ANG MO KIO",
-            "313": "313 - CANBERRA PLAZA",
-            "314": "314 - BUKIT GOMBAK",
-            "316": "316 - PASIR RIS MRT",
-            "317": "317 - NORTHPOINT",
-            "401": "401 - BUGIS JUNCTION",
-            "402": "402 - 313 SOMERSET",
-            "403": "403 - TAMPINES ONE",
-        }
-        
-        # Map store codes to proper outlet names
-        store_codes = frame.get("store_name", pd.Series("", index=frame.index, dtype="object"))
-        frame["Outlet"] = store_codes.map(outlet_mapping).fillna(store_codes).astype(str)
-        frame["Bill (Sales No)"] = frame.get("sales_no", pd.Series("", index=frame.index, dtype="object")).fillna("")
-        # Payment info is not available in details data, leave empty
-        frame["Payment"] = ""
-        frame["Item Name"] = frame.get("item_name", pd.Series("", index=frame.index, dtype="object")).fillna("")
-        frame["Category"] = frame.get("category", pd.Series("", index=frame.index, dtype="object")).fillna("")
-        frame["QTY"] = pd.to_numeric(frame.get("qty", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
-        frame["Sales"] = pd.to_numeric(frame.get("sub_total", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
-        frame["Discount Name"] = frame.get("disc_name", pd.Series("", index=frame.index, dtype="object")).fillna("")
-        # Also check for $DISC column as fallback
-        disc_alt = frame.get("$DISC", pd.Series("", index=frame.index, dtype="object"))
-        frame["Discount Name"] = frame["Discount Name"].where(frame["Discount Name"] != "", disc_alt).fillna("")
-        disc_amt = pd.to_numeric(frame.get("disc_amt", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
-        promo_disc = pd.to_numeric(frame.get("pro_disc_amt", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+        frame["Outlet"] = frame["store_name"].fillna("")
+        frame["Bill (Sales No)"] = frame["sales_no"].fillna("")
+        frame["Payment"] = frame["payment_methods"].fillna("")
+        frame["Item Name"] = frame["item_name"].fillna("")
+        frame["Category"] = frame.get("category_code", "").fillna("")
+        frame["QTY"] = pd.to_numeric(frame["qty"], errors="coerce").fillna(0.0)
+        frame["Sales"] = pd.to_numeric(frame["sub_total"], errors="coerce").fillna(0.0)
+        frame["Discount Name"] = frame["disc_name"].fillna("")
+        disc_amt = pd.to_numeric(frame.get("disc_amt"), errors="coerce").fillna(0.0)
+        promo_disc = pd.to_numeric(frame.get("pro_disc_amt"), errors="coerce").fillna(0.0)
         frame["Discount Sales"] = disc_amt + promo_disc
-        svc_amt = pd.to_numeric(frame.get("svc_amt", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
-        tax_amt = pd.to_numeric(frame.get("tax_amt", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+        svc_amt = pd.to_numeric(frame.get("svc_amt"), errors="coerce").fillna(0.0)
+        tax_amt = pd.to_numeric(frame.get("tax_amt"), errors="coerce").fillna(0.0)
         if "source_database" in frame:
             source_db_fmt = frame["source_database"].astype(str)
         else:
@@ -8236,12 +7583,9 @@ QScrollBar::handle:horizontal {{
             takeaway_flag_fmt = frame["take_away_item"].astype(str).str.upper()
         else:
             takeaway_flag_fmt = pd.Series("", index=frame.index, dtype="object")
-        epoint_mask_fmt = source_db_fmt.eq("sushi_epoint_pos_live")
+        express_mask_fmt = source_db_fmt.eq("sushi_express_pos_live")
         takeaway_mask_fmt = takeaway_flag_fmt.eq("Y")
-        # Fix tax deduction logic - divide by 1.09 only for Epoint non-dine-in (takeaway and others)
-        # Sushi Express and other databases keep tax included, Epoint dine-in keeps tax included
-        # Only Epoint non-dine-in needs to remove GST by dividing by 1.09
-        tax_deduction_fmt = np.where(epoint_mask_fmt & takeaway_mask_fmt, frame["Sales"] * 0.09 / 1.09, 0.0)
+        tax_deduction_fmt = np.where(express_mask_fmt & ~takeaway_mask_fmt, 0.0, tax_amt)
         frame["Nett Sales"] = frame["Sales"] - frame["Discount Sales"] - tax_deduction_fmt + svc_amt
         frame[["Sales", "Discount Sales", "Nett Sales"]] = frame[["Sales", "Discount Sales", "Nett Sales"]].round(1)
 
@@ -8249,44 +7593,6 @@ QScrollBar::handle:horizontal {{
         display.sort_values(["Date", "Outlet", "Bill (Sales No)", "Item Name"], inplace=True)
         display.reset_index(drop=True, inplace=True)
         return display
-
-
-def _epoint_available_range() -> Optional[Tuple[date, date]]:
-    base_path = Path(".pos_cache") / "sushi_epoint_pos_live"
-    if not base_path.exists():
-        return None
-
-    pattern = re.compile(r"pos_(\d{8})_")
-    min_date: Optional[date] = None
-    max_date: Optional[date] = None
-
-    for parquet_path in base_path.rglob("pos_*.parquet"):
-        match = pattern.search(parquet_path.name)
-        if not match:
-            continue
-        try:
-            file_date = datetime.strptime(match.group(1), "%Y%m%d").date()
-        except ValueError:
-            continue
-
-        if min_date is None or file_date < min_date:
-            min_date = file_date
-        if max_date is None or file_date > max_date:
-            max_date = file_date
-
-    if min_date is None or max_date is None:
-        return None
-    return min_date, max_date
-
-
-def _ranges_overlap(lhs: Tuple[date, date], rhs: Tuple[date, date]) -> bool:
-    lhs_start, lhs_end = lhs
-    rhs_start, rhs_end = rhs
-    if lhs_start > lhs_end:
-        lhs_start, lhs_end = lhs_end, lhs_start
-    if rhs_start > rhs_end:
-        rhs_start, rhs_end = rhs_end, rhs_start
-    return lhs_start <= rhs_end and rhs_start <= lhs_end
 
 
 class SalesSearchProxy(QtCore.QSortFilterProxyModel):
