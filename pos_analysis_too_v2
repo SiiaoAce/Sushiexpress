@@ -1922,9 +1922,13 @@ class DataRepository(QtCore.QObject):
             clauses.append(f"CAST(d.disc_name AS VARCHAR) IN ({placeholders})")
             params.extend(state.discounts)
         if state.weekdays:
-            placeholders = ",".join("?" for _ in state.weekdays)
-            clauses.append(f"extract('dow' FROM d.c_date) IN ({placeholders})")
-            params.extend(state.weekdays)
+            # Convert Python weekday (0=Monday) to database weekday (1=Sunday, 2=Monday, etc.)
+            db_weekdays = [str((wd + 2) % 7 or 7) for wd in state.weekdays]
+            placeholders = ",".join("?" for _ in db_weekdays)
+            clauses.append(f"extract(dow from d.c_date) + 1 IN ({placeholders}) OR "
+                         f"(extract(dow from d.c_date) = 6 AND 1 IN ({placeholders}))")
+            params.extend(db_weekdays)
+            params.extend(db_weekdays)  # Add them again for the second part of OR
         where_sql = " AND ".join(clauses)
         filtered_detail = conn.execute(
             "SELECT * FROM d WHERE " + where_sql,
@@ -2153,9 +2157,13 @@ class DataRepository(QtCore.QObject):
             dc_params.extend(state.discounts)
         wd_params: List[object] = []
         if state.weekdays:
-            placeholders = ",".join("?" for _ in state.weekdays)
-            weekdays_where = f"extract('dow' FROM d.c_date) IN ({placeholders})"
-            wd_params.extend(state.weekdays)
+            # Convert Python weekday (0=Monday) to database weekday (1=Sunday, 2=Monday, etc.)
+            db_weekdays = [str((wd + 2) % 7 or 7) for wd in state.weekdays]
+            placeholders = ",".join("?" for _ in db_weekdays)
+            weekdays_where = (f"(extract(dow from d.c_date) + 1 IN ({placeholders}) OR "
+                           f"(extract(dow from d.c_date) = 6 AND 1 IN ({placeholders})))")
+            wd_params.extend(db_weekdays)
+            wd_params.extend(db_weekdays)  # Add them again for the second part of OR
         total_detail = len(base_detail.index)
         total_payment = len(base_payments.index)
         date_cnt = conn.execute(f"SELECT COUNT(*) FROM d WHERE {date_where}", params).fetchone()[0]
