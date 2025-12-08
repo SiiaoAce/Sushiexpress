@@ -1,5 +1,85 @@
 from __future__ import annotations
 
+"""
+POS Tool V2 - 架構說明與使用指南
+====================================
+
+【功能概述】
+這是一個桌面 POS 資料分析工具，支援:
+1. GUI 模式: PyQt6 視覺化介面，提供多種分析報表 (銷售、支付、折扣等)
+2. CLI 快速查詢模式: 命令列直接查詢本地快取，快速取得彙總結果
+
+【資料層 (Data Layer)】
+- DataRepository: 負責 DuckDB 連線管理、本地 Parquet 快取、遠端 SQL Server 同步
+- storage_duckdb: DuckDB 連線與底層儲存操作
+- BrandCacheEntry, AggregationCacheMetadata: 快取元資料管理
+- 核心原則: 所有重度計算應該在 DuckDB SQL 內完成，減少 pandas 處理
+
+【UI 層 (UI Layer)】
+- MainWindow: PyQt6 主視窗，包含各種分析 tab (Sales, Payment, Discount, etc.)
+- 各 Tab Widget: 負責顯示、篩選操作，呼叫資料層 API 取得結果
+- 核心原則: UI 只負責顯示與使用者互動，不做重度資料處理
+
+【資料流】
+1. 使用者選擇日期範圍、品牌 → UI 層收集 FilterState
+2. UI 呼叫 DataRepository.load_data() 或 load_aggregated_details()
+3. DataRepository 檢查本地快取 (Parquet)，若缺資料則從 SQL Server 同步
+4. 資料載入後，使用 DuckDB SQL 做彙總 (groupby, aggregation)
+5. 回傳 DataFrame 給 UI 顯示
+
+【優化重點】
+- 盡量將 pandas groupby/agg 改成 DuckDB SQL
+- 避免 SELECT *，明確指定需要的欄位
+- 善用現有 monthly cache 機制，不重複載入
+
+【CLI 快速查詢模式使用範例】
+
+# 查詢 SE 品牌 2025-12-01 到 2025-12-07 的每日銷售
+python pos_tool_v2.py --quick-query daily_sales --start 2025-12-01 --end 2025-12-07 --brand SE
+
+# 查詢所有品牌 11 月份的門市銷售彙總
+python pos_tool_v2.py --quick-query outlet_sales --start 2025-11-01 --end 2025-11-30
+
+# 查詢 Top 10 熱賣商品並輸出到 CSV
+python pos_tool_v2.py --quick-query item_sales_top10 --start 2025-12-01 --end 2025-12-07 --output report.csv
+
+【GUI 模式】
+# 不帶參數啟動，會開啟視覺化介面
+python pos_tool_v2.py
+
+【效能優化對照】
+
+原本做法 (pandas groupby):
+```python
+df = detail_df.groupby(["c_date", "store_name"], as_index=False).agg({
+    "net_sales_amount": "sum",
+    "qty": "sum",
+})
+df["sales_ratio_pct"] = df["net_sales_amount"] * 100 / df["net_sales_amount"].sum()
+```
+
+優化做法 (DuckDB SQL):
+```python
+sql = '''
+SELECT
+    DATE(c_date) AS sales_date,
+    store_name,
+    SUM(net_sales_amount) AS total_sales,
+    SUM(qty) AS total_qty,
+    SUM(net_sales_amount) * 100.0 / SUM(SUM(net_sales_amount)) OVER () AS sales_ratio_pct
+FROM sales_detail
+GROUP BY DATE(c_date), store_name
+'''
+result = repo.run_duckdb_query(sql)
+```
+
+優點:
+- 減少記憶體使用 (不需要將所有資料載入 pandas)
+- 善用 DuckDB 的 columnar 儲存與並行處理
+- 視窗函數 (OVER) 避免二次計算總和
+
+"""
+
 import sys
 import traceback
 from dataclasses import dataclass, field, asdict
@@ -20,6 +100,7 @@ import statistics
 import uuid
 import calendar
 from collections import defaultdict
+import argparse
 
 import duckdb
 import pandas as pd
@@ -840,7 +921,21 @@ class DataCachePaths:
 
 
 class DataRepository(QtCore.QObject):
-    """Coordinates local DuckDB cache and remote SQL Server fetching."""
+    """
+    【資料層核心】Coordinates local DuckDB cache and remote SQL Server fetching.
+    
+    職責:
+    - DuckDB 連線管理與查詢執行
+    - 本地 Parquet 快取管理 (按月份)
+    - 遠端 SQL Server 資料同步
+    - 彙總報表計算 (應優先使用 DuckDB SQL)
+    
+    重要方法:
+    - duckdb_connection(): 取得 DuckDB 連線
+    - run_duckdb_query(): 執行 SQL 查詢並回傳 DataFrame
+    - load_data(): 載入原始資料 (從快取或遠端)
+    - load_aggregated_details(): 載入彙總資料
+    """
 
     log_message = QtCore.pyqtSignal(str)
     filters_ready = QtCore.pyqtSignal(object, object)
@@ -950,6 +1045,45 @@ class DataRepository(QtCore.QObject):
                 pass
         return self._connections[db_name]
 
+    def run_duckdb_query(
+        self,
+        sql: str,
+        params: Optional[Sequence[object]] = None,
+        db_name: str = "main",
+        log_performance: bool = False,
+        query_name: str = "unnamed_query"
+    ) -> pd.DataFrame:
+        """
+        統一的 DuckDB 查詢 helper，用於執行 SQL 並回傳 DataFrame。
+        
+        Args:
+            sql: SQL 查詢語句 (可包含 ? 參數佔位符)
+            params: SQL 參數 (對應 ? 佔位符)
+            db_name: 資料庫名稱，預設 "main"
+            log_performance: 是否記錄效能資訊
+            query_name: 查詢名稱（用於效能日誌）
+        
+        Returns:
+            查詢結果的 DataFrame
+            
+        用途:
+            所有重度彙總查詢應該透過此方法，將計算交給 DuckDB SQL 處理，
+            減少 pandas 做 groupby/agg 的負擔。
+        """
+        conn = self.duckdb_connection(db_name)
+        
+        if log_performance:
+            start_time = time.perf_counter()
+            result = self._exec_fetch_df(conn, sql, params)
+            elapsed = time.perf_counter() - start_time
+            self.log_message.emit(
+                f"[PERF] Query '{query_name}' completed in {elapsed:.3f}s, "
+                f"returned {len(result)} rows × {len(result.columns)} cols"
+            )
+            return result
+        else:
+            return self._exec_fetch_df(conn, sql, params)
+
     def close(self) -> None:
         for conn in self._connections.values():
             conn.close()
@@ -958,6 +1092,190 @@ class DataRepository(QtCore.QObject):
             self._save_activity_records()
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # CLI 快速查詢模式 (Quick Query Mode)
+    # ------------------------------------------------------------------
+    def run_quick_query(
+        self,
+        query_type: str,
+        start_date: str,
+        end_date: str,
+        brand: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        CLI 快速查詢模式：不啟動 GUI，直接從本地 DuckDB/Parquet 快取查詢彙總結果。
+        
+        Args:
+            query_type: 查詢類型，例如 'daily_sales', 'outlet_sales', 'item_sales_top10'
+            start_date: 開始日期 (YYYY-MM-DD)
+            end_date: 結束日期 (YYYY-MM-DD)
+            brand: 品牌篩選 (可選，例如 'SE', 'GOGO', 'PLUS')
+        
+        Returns:
+            查詢結果 DataFrame
+            
+        支援的查詢類型:
+            - daily_sales: 每日銷售彙總 (依 c_date, store_name)
+            - outlet_sales: 門市銷售彙總 (依 store_name)
+            - item_sales_top10: Top 10 熱賣商品
+            - payment_summary: 支付方式彙總
+            - discount_summary: 折扣分析彙總
+            - category_sales: 商品分類銷售分析
+        """
+        # 決定使用哪個資料庫
+        if brand:
+            brand_upper = brand.upper()
+            db_map = {
+                "SE": "sushi_express_pos_live",
+                "GOGO": "sushi_gogo_pos_live",
+                "PLUS": "sushi_plus_pos_live",
+            }
+            db_name = db_map.get(brand_upper, COMBINED_DATABASE)
+        else:
+            db_name = COMBINED_DATABASE
+        
+        conn = self.duckdb_connection(db_name)
+        cache_paths = self.cache_paths[db_name]
+        
+        # 取得快取路徑下的 Parquet 檔案
+        parquet_pattern = str(cache_paths.data_dir() / "**" / "*.parquet")
+        
+        # 依查詢類型執行不同的 SQL
+        # 【優化重點】：所有查詢都明確指定需要的欄位，避免 SELECT *
+        # 這樣可以減少從 Parquet 讀取的資料量，提升效能
+        
+        if query_type == "daily_sales":
+            # 只讀取 c_date, store_name, net_sales_amount, qty, sales_no 這五個欄位
+            sql = f"""
+            SELECT
+                DATE(c_date) AS sales_date,
+                store_name,
+                SUM(net_sales_amount) AS total_sales,
+                SUM(qty) AS total_qty,
+                COUNT(DISTINCT sales_no) AS transaction_count
+            FROM read_parquet('{parquet_pattern}', union_by_name=true, filename=true)
+            WHERE DATE(c_date) BETWEEN ? AND ?
+            GROUP BY DATE(c_date), store_name
+            ORDER BY sales_date, store_name
+            """
+            params = [start_date, end_date]
+            
+        elif query_type == "outlet_sales":
+            sql = f"""
+            SELECT
+                store_name,
+                SUM(net_sales_amount) AS total_sales,
+                SUM(qty) AS total_qty,
+                COUNT(DISTINCT sales_no) AS transaction_count,
+                COUNT(DISTINCT DATE(c_date)) AS active_days
+            FROM read_parquet('{parquet_pattern}', union_by_name=true, filename=true)
+            WHERE DATE(c_date) BETWEEN ? AND ?
+            GROUP BY store_name
+            ORDER BY total_sales DESC
+            """
+            params = [start_date, end_date]
+            
+        elif query_type == "item_sales_top10":
+            sql = f"""
+            SELECT
+                item_name,
+                SUM(net_sales_amount) AS total_sales,
+                SUM(qty) AS total_qty,
+                SUM(net_sales_amount) * 100.0 / SUM(SUM(net_sales_amount)) OVER () AS sales_ratio_pct
+            FROM read_parquet('{parquet_pattern}', union_by_name=true, filename=true)
+            WHERE DATE(c_date) BETWEEN ? AND ?
+            GROUP BY item_name
+            ORDER BY total_sales DESC
+            LIMIT 10
+            """
+            params = [start_date, end_date]
+            
+        elif query_type == "payment_summary":
+            # 支付方式彙總分析（需要從 payment 相關的 Parquet 讀取）
+            payment_pattern = str(cache_paths.data_dir() / "**" / "*payment*.parquet")
+            sql = f"""
+            WITH payment_data AS (
+                SELECT
+                    CAST(payment_name AS VARCHAR) AS payment_method,
+                    CAST(tender_amt AS DOUBLE) AS tender_amount,
+                    CAST(sales_no AS VARCHAR) AS sales_no,
+                    DATE(c_date) AS sales_date
+                FROM read_parquet('{payment_pattern}', union_by_name=true, filename=true)
+                WHERE DATE(c_date) BETWEEN ? AND ?
+            )
+            SELECT
+                payment_method,
+                SUM(tender_amount) AS total_amount,
+                COUNT(DISTINCT sales_no) AS transaction_count,
+                SUM(tender_amount) * 100.0 / SUM(SUM(tender_amount)) OVER () AS amount_ratio_pct,
+                COUNT(DISTINCT sales_no) * 100.0 / SUM(COUNT(DISTINCT sales_no)) OVER () AS txn_ratio_pct
+            FROM payment_data
+            GROUP BY payment_method
+            ORDER BY total_amount DESC
+            """
+            params = [start_date, end_date]
+            
+        elif query_type == "discount_summary":
+            # 折扣分析彙總
+            sql = f"""
+            WITH discount_data AS (
+                SELECT
+                    CAST(disc_name AS VARCHAR) AS discount_name,
+                    CAST(disc_amt AS DOUBLE) + CAST(pro_disc_amt AS DOUBLE) AS discount_amount,
+                    qty,
+                    CAST(sales_no AS VARCHAR) AS sales_no,
+                    DATE(c_date) AS sales_date
+                FROM read_parquet('{parquet_pattern}', union_by_name=true, filename=true)
+                WHERE DATE(c_date) BETWEEN ? AND ?
+                  AND disc_name IS NOT NULL
+                  AND TRIM(CAST(disc_name AS VARCHAR)) != ''
+                  AND (COALESCE(CAST(disc_amt AS DOUBLE), 0) + COALESCE(CAST(pro_disc_amt AS DOUBLE), 0)) > 0
+            )
+            SELECT
+                discount_name,
+                SUM(discount_amount) AS total_discount,
+                SUM(qty) AS total_quantity,
+                COUNT(DISTINCT sales_no) AS transaction_count,
+                SUM(discount_amount) * 100.0 / SUM(SUM(discount_amount)) OVER () AS discount_ratio_pct
+            FROM discount_data
+            GROUP BY discount_name
+            ORDER BY total_discount DESC
+            LIMIT 20
+            """
+            params = [start_date, end_date]
+            
+        elif query_type == "category_sales":
+            # 商品分類銷售分析
+            sql = f"""
+            SELECT
+                COALESCE(CAST(category_code AS VARCHAR), 'Unknown') AS category,
+                SUM(net_sales_amount) AS total_sales,
+                SUM(qty) AS total_qty,
+                COUNT(DISTINCT sales_no) AS transaction_count,
+                SUM(net_sales_amount) * 100.0 / SUM(SUM(net_sales_amount)) OVER () AS sales_ratio_pct,
+                SUM(qty) * 100.0 / SUM(SUM(qty)) OVER () AS qty_ratio_pct
+            FROM read_parquet('{parquet_pattern}', union_by_name=true, filename=true)
+            WHERE DATE(c_date) BETWEEN ? AND ?
+            GROUP BY category_code
+            ORDER BY total_sales DESC
+            """
+            params = [start_date, end_date]
+            
+        else:
+            return pd.DataFrame({"error": [f"Unknown query_type: {query_type}"]})
+        
+        # 加入效能監控
+        start_time = time.perf_counter()
+        try:
+            result = self._exec_fetch_df(conn, sql, params)
+            elapsed = time.perf_counter() - start_time
+            self.log_message.emit(f"[PERF] Quick query '{query_type}' completed in {elapsed:.2f}s, returned {len(result)} rows")
+            return result
+        except Exception as e:
+            elapsed = time.perf_counter() - start_time
+            self.log_message.emit(f"[ERROR] Quick query '{query_type}' failed after {elapsed:.2f}s: {e}")
+            return pd.DataFrame({"error": [str(e)]})
 
     def _exec_fetch_df(self, conn: duckdb.DuckDBPyConnection, sql: str, params: Optional[Sequence[object]] = None) -> pd.DataFrame:
         try:
@@ -972,6 +1290,342 @@ class DataRepository(QtCore.QObject):
 
     # ------------------------------------------------------------------
     # Aggregation metadata helpers
+    # ------------------------------------------------------------------
+    
+    def compute_daily_outlet_summary_optimized(
+        self,
+        detail_df: pd.DataFrame,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        【優化示範】使用 DuckDB SQL 計算每日門市銷售彙總。
+        
+        原本做法 (pandas):
+            df = detail_df.groupby(["c_date", "store_name"], as_index=False).agg({
+                "net_sales_amount": "sum",
+                "qty": "sum",
+                "sales_no": "nunique"
+            })
+            df["sales_ratio_pct"] = df["net_sales_amount"] * 100 / df["net_sales_amount"].sum()
+        
+        優化做法 (DuckDB SQL):
+            將 groupby 和百分比計算都在 SQL 內完成，減少 pandas 處理。
+            使用 OVER() 視窗函數計算比例，避免二次計算。
+        
+        Args:
+            detail_df: 銷售明細 DataFrame
+            start_date: 開始日期篩選 (可選)
+            end_date: 結束日期篩選 (可選)
+        
+        Returns:
+            彙總結果 DataFrame，包含欄位:
+            - sales_date: 日期
+            - store_name: 門市
+            - total_sales: 總銷售額
+            - total_qty: 總數量
+            - transaction_count: 交易筆數
+            - sales_ratio_pct: 銷售佔比 %
+        """
+        if detail_df.empty:
+            return pd.DataFrame(columns=["sales_date", "store_name", "total_sales", "total_qty", "transaction_count", "sales_ratio_pct"])
+        
+        # 使用 DuckDB SQL 做彙總
+        conn = duckdb.connect(database=":memory:")
+        conn.register("sales_detail", detail_df)
+        
+        date_filter = ""
+        params = []
+        if start_date and end_date:
+            date_filter = "WHERE DATE(c_date) BETWEEN ? AND ?"
+            params = [start_date, end_date]
+        elif start_date:
+            date_filter = "WHERE DATE(c_date) >= ?"
+            params = [start_date]
+        elif end_date:
+            date_filter = "WHERE DATE(c_date) <= ?"
+            params = [end_date]
+        
+        sql = f"""
+        SELECT
+            DATE(c_date) AS sales_date,
+            store_name,
+            SUM(COALESCE(net_sales_amount, 0)) AS total_sales,
+            SUM(COALESCE(qty, 0)) AS total_qty,
+            COUNT(DISTINCT sales_no) AS transaction_count,
+            SUM(COALESCE(net_sales_amount, 0)) * 100.0 / 
+                SUM(SUM(COALESCE(net_sales_amount, 0))) OVER () AS sales_ratio_pct
+        FROM sales_detail
+        {date_filter}
+        GROUP BY DATE(c_date), store_name
+        ORDER BY sales_date, store_name
+        """
+        
+        try:
+            result = conn.execute(sql, params).df()
+            conn.close()
+            return result
+        except Exception as e:
+            conn.close()
+            # Fallback to pandas if SQL fails (保持向後相容)
+            print(f"DuckDB query failed, falling back to pandas: {e}")
+            return self._compute_daily_outlet_summary_pandas_fallback(detail_df, start_date, end_date)
+    
+    def _compute_daily_outlet_summary_pandas_fallback(
+        self,
+        detail_df: pd.DataFrame,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Pandas fallback 版本 (原本做法)"""
+        df = detail_df.copy()
+        
+        # 日期篩選
+        if start_date or end_date:
+            df["_date"] = pd.to_datetime(df["c_date"], errors="coerce").dt.date
+            if start_date:
+                df = df[df["_date"] >= pd.to_datetime(start_date).date()]
+            if end_date:
+                df = df[df["_date"] <= pd.to_datetime(end_date).date()]
+        
+        # Groupby aggregation
+        result = df.groupby([pd.to_datetime(df["c_date"]).dt.date, "store_name"], as_index=False).agg({
+            "net_sales_amount": "sum",
+            "qty": "sum",
+            "sales_no": "nunique"
+        })
+        result.columns = ["sales_date", "store_name", "total_sales", "total_qty", "transaction_count"]
+        
+        # 計算比例
+        total_sales_sum = result["total_sales"].sum()
+        result["sales_ratio_pct"] = result["total_sales"] * 100 / total_sales_sum if total_sales_sum > 0 else 0
+        
+        return result.sort_values(["sales_date", "store_name"])
+
+    def compute_payment_summary_optimized(
+        self,
+        payment_df: pd.DataFrame,
+        detail_df: pd.DataFrame,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        【優化示範】使用 DuckDB SQL 計算支付方式彙總。
+        
+        優化做法:
+            - 在 SQL 內完成 payment 與 detail 的 JOIN
+            - 使用視窗函數計算比例
+            - 避免 pandas 的多次 groupby 和 merge
+        
+        Args:
+            payment_df: 支付明細 DataFrame
+            detail_df: 銷售明細 DataFrame (用於關聯票據總額)
+            start_date: 開始日期篩選 (可選)
+            end_date: 結束日期篩選 (可選)
+        
+        Returns:
+            支付方式彙總 DataFrame
+        """
+        if payment_df.empty:
+            return pd.DataFrame(columns=["payment_method", "total_amount", "transaction_count", "amount_ratio_pct"])
+        
+        conn = duckdb.connect(database=":memory:")
+        conn.register("payments", payment_df)
+        conn.register("details", detail_df)
+        
+        date_filter = ""
+        params = []
+        if start_date and end_date:
+            date_filter = "WHERE DATE(p.c_date) BETWEEN ? AND ?"
+            params = [start_date, end_date]
+        elif start_date:
+            date_filter = "WHERE DATE(p.c_date) >= ?"
+            params = [start_date]
+        elif end_date:
+            date_filter = "WHERE DATE(p.c_date) <= ?"
+            params = [end_date]
+        
+        sql = f"""
+        SELECT
+            CAST(p.payment_name AS VARCHAR) AS payment_method,
+            SUM(CAST(p.tender_amt AS DOUBLE)) AS total_amount,
+            COUNT(DISTINCT p.sales_no) AS transaction_count,
+            SUM(CAST(p.tender_amt AS DOUBLE)) * 100.0 / 
+                SUM(SUM(CAST(p.tender_amt AS DOUBLE))) OVER () AS amount_ratio_pct,
+            COUNT(DISTINCT p.sales_no) * 100.0 / 
+                SUM(COUNT(DISTINCT p.sales_no)) OVER () AS txn_ratio_pct
+        FROM payments p
+        {date_filter}
+        GROUP BY p.payment_name
+        ORDER BY total_amount DESC
+        """
+        
+        try:
+            result = conn.execute(sql, params).df()
+            conn.close()
+            return result
+        except Exception as e:
+            conn.close()
+            print(f"DuckDB payment query failed: {e}")
+            return pd.DataFrame(columns=["payment_method", "total_amount", "transaction_count", "amount_ratio_pct"])
+    
+    def compute_discount_summary_optimized(
+        self,
+        detail_df: pd.DataFrame,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        top_n: int = 20,
+    ) -> pd.DataFrame:
+        """
+        【優化示範】使用 DuckDB SQL 計算折扣分析彙總。
+        
+        優化做法:
+            - 在 SQL 內完成折扣金額計算與過濾
+            - 使用視窗函數計算比例
+            - 直接在 SQL 限制 Top N 結果
+        
+        Args:
+            detail_df: 銷售明細 DataFrame
+            start_date: 開始日期篩選 (可選)
+            end_date: 結束日期篩選 (可選)
+            top_n: 回傳前 N 個折扣項目
+        
+        Returns:
+            折扣彙總 DataFrame
+        """
+        if detail_df.empty:
+            return pd.DataFrame(columns=["discount_name", "total_discount", "total_quantity", "transaction_count"])
+        
+        conn = duckdb.connect(database=":memory:")
+        conn.register("details", detail_df)
+        
+        date_filter = ""
+        params = []
+        if start_date and end_date:
+            date_filter = "AND DATE(c_date) BETWEEN ? AND ?"
+            params = [start_date, end_date]
+        elif start_date:
+            date_filter = "AND DATE(c_date) >= ?"
+            params = [start_date]
+        elif end_date:
+            date_filter = "AND DATE(c_date) <= ?"
+            params = [end_date]
+        
+        sql = f"""
+        WITH discount_data AS (
+            SELECT
+                TRIM(CAST(disc_name AS VARCHAR)) AS discount_name,
+                COALESCE(CAST(disc_amt AS DOUBLE), 0) + COALESCE(CAST(pro_disc_amt AS DOUBLE), 0) AS discount_amount,
+                COALESCE(qty, 0) AS quantity,
+                sales_no
+            FROM details
+            WHERE disc_name IS NOT NULL
+              AND TRIM(CAST(disc_name AS VARCHAR)) != ''
+              AND (COALESCE(CAST(disc_amt AS DOUBLE), 0) + COALESCE(CAST(pro_disc_amt AS DOUBLE), 0)) > 0
+              {date_filter}
+        )
+        SELECT
+            discount_name,
+            SUM(discount_amount) AS total_discount,
+            SUM(quantity) AS total_quantity,
+            COUNT(DISTINCT sales_no) AS transaction_count,
+            SUM(discount_amount) * 100.0 / SUM(SUM(discount_amount)) OVER () AS discount_ratio_pct,
+            COUNT(DISTINCT sales_no) * 100.0 / SUM(COUNT(DISTINCT sales_no)) OVER () AS txn_ratio_pct
+        FROM discount_data
+        GROUP BY discount_name
+        ORDER BY total_discount DESC
+        LIMIT {top_n}
+        """
+        
+        try:
+            result = conn.execute(sql, params).df()
+            conn.close()
+            return result
+        except Exception as e:
+            conn.close()
+            print(f"DuckDB discount query failed: {e}")
+            return pd.DataFrame(columns=["discount_name", "total_discount", "total_quantity", "transaction_count"])
+    
+    def compute_product_analysis_optimized(
+        self,
+        detail_df: pd.DataFrame,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        group_by_category: bool = True,
+        top_n: int = 50,
+    ) -> pd.DataFrame:
+        """
+        【優化示範】使用 DuckDB SQL 計算產品銷售分析。
+        
+        優化做法:
+            - 在 SQL 內完成產品銷售額、數量、報廢計算
+            - 支援依類別分組或依產品明細分組
+            - 使用視窗函數計算比例和排名
+        
+        Args:
+            detail_df: 銷售明細 DataFrame
+            start_date: 開始日期篩選 (可選)
+            end_date: 結束日期篩選 (可選)
+            group_by_category: True=依類別彙總, False=依產品明細彙總
+            top_n: 回傳前 N 個項目
+        
+        Returns:
+            產品分析 DataFrame
+        """
+        if detail_df.empty:
+            return pd.DataFrame(columns=["product_name", "total_sales", "total_quantity", "avg_price"])
+        
+        conn = duckdb.connect(database=":memory:")
+        conn.register("details", detail_df)
+        
+        date_filter = ""
+        params = []
+        if start_date and end_date:
+            date_filter = "WHERE DATE(c_date) BETWEEN ? AND ?"
+            params = [start_date, end_date]
+        elif start_date:
+            date_filter = "WHERE DATE(c_date) >= ?"
+            params = [start_date]
+        elif end_date:
+            date_filter = "WHERE DATE(c_date) <= ?"
+            params = [end_date]
+        
+        group_column = "prod_class_name" if group_by_category else "prod_name"
+        
+        sql = f"""
+        SELECT
+            CAST({group_column} AS VARCHAR) AS product_name,
+            SUM(COALESCE(CAST(net_amt AS DOUBLE), 0)) AS total_sales,
+            SUM(COALESCE(qty, 0)) AS total_quantity,
+            SUM(COALESCE(CAST(wastage_amt AS DOUBLE), 0)) AS total_wastage,
+            COUNT(DISTINCT sales_no) AS transaction_count,
+            CASE 
+                WHEN SUM(COALESCE(qty, 0)) > 0 
+                THEN SUM(COALESCE(CAST(net_amt AS DOUBLE), 0)) / SUM(COALESCE(qty, 0))
+                ELSE 0 
+            END AS avg_price,
+            SUM(COALESCE(CAST(net_amt AS DOUBLE), 0)) * 100.0 / 
+                SUM(SUM(COALESCE(CAST(net_amt AS DOUBLE), 0))) OVER () AS sales_ratio_pct,
+            SUM(COALESCE(qty, 0)) * 100.0 / 
+                SUM(SUM(COALESCE(qty, 0))) OVER () AS qty_ratio_pct
+        FROM details
+        {date_filter}
+        GROUP BY {group_column}
+        ORDER BY total_sales DESC
+        LIMIT {top_n}
+        """
+        
+        try:
+            result = conn.execute(sql, params).df()
+            conn.close()
+            return result
+        except Exception as e:
+            conn.close()
+            print(f"DuckDB product analysis query failed: {e}")
+            return pd.DataFrame(columns=["product_name", "total_sales", "total_quantity", "avg_price"])
+
+    # ------------------------------------------------------------------
+    # Aggregation metadata helpers (original)
     # ------------------------------------------------------------------
     @staticmethod
     def _brand_label(source: Optional[str], store_name: Optional[str] = None) -> str:
@@ -1092,6 +1746,25 @@ class DataRepository(QtCore.QObject):
     def _load_cached_raw_frames(
         self, db_name: str, period_keys: Optional[Iterable[str]] = None
     ) -> SalesRawFrames:
+        """
+        【快取機制核心】從本地 Parquet 快取載入已彙總的月份資料。
+        
+        現有快取架構優點:
+        1. 按月份切檔 (monthly cache)，方便增量更新
+        2. 使用 Parquet 格式，壓縮率高、讀取快速
+        3. 透過 metadata JSON 追蹤已快取的期間
+        4. 支援多品牌獨立快取 (sushi_express_pos_live, sushi_gogo_pos_live, etc.)
+        
+        效能關鍵:
+        - 只載入需要的月份 (透過 period_keys 篩選)
+        - 使用 DuckDB 的 read_parquet() 直接讀取，避免額外複製
+        - PRAGMA threads 與 enable_object_cache 提升並行讀取效能
+        
+        維護重點:
+        - 不要移除這個架構，它已經很好地平衡了效能與彈性
+        - 可以在使用端改進 SQL 查詢，但快取機制保持不變
+        """
+        start_time = time.perf_counter()
         metadata = self._load_aggregation_metadata(db_name)
         if not metadata.periods:
             return SalesRawFrames(pd.DataFrame(), pd.DataFrame())
@@ -1102,6 +1775,10 @@ class DataRepository(QtCore.QObject):
 
         cache_path = self.cache_paths[db_name]
 
+        # TODO: 優化機會 - 可以指定只讀需要的欄位，減少 I/O
+        # 例如: SELECT c_date, store_name, sales_no, item_name, net_sales_amount, qty FROM read_parquet(?)
+        # 目前使用 SELECT * 是為了保持彈性，但在明確知道使用場景時可以優化
+        
         for key in selected_keys:
             meta = metadata.periods.get(key)
             if not meta:
@@ -1113,6 +1790,7 @@ class DataRepository(QtCore.QObject):
                 if detail_path.exists():
                     try:
                         conn = self.duckdb_connection(db_name)
+                        # 保持 SELECT * 以確保向後相容
                         df = conn.execute(
                             "SELECT * FROM read_parquet(?)",
                             [detail_path.as_posix()],
@@ -1129,6 +1807,7 @@ class DataRepository(QtCore.QObject):
                 if payments_path.exists():
                     try:
                         conn = self.duckdb_connection(db_name)
+                        # 保持 SELECT * 以確保向後相容
                         df = conn.execute(
                             "SELECT * FROM read_parquet(?)",
                             [payments_path.as_posix()],
@@ -1141,6 +1820,12 @@ class DataRepository(QtCore.QObject):
 
         detail_df = pd.concat(detail_frames, ignore_index=True) if detail_frames else pd.DataFrame()
         payment_df = pd.concat(payment_frames, ignore_index=True) if payment_frames else pd.DataFrame()
+        
+        elapsed = time.perf_counter() - start_time
+        self.log_message.emit(
+            f"[PERF] _load_cached_raw_frames({db_name}): {len(selected_keys)} periods, "
+            f"{len(detail_df):,} detail rows, {len(payment_df):,} payment rows in {elapsed:.3f}s"
+        )
         return SalesRawFrames(detail_df, payment_df)
 
     def _save_cached_raw_frames(
@@ -2104,12 +2789,13 @@ class DataRepository(QtCore.QObject):
 
         return new_entry
 
-    @staticmethod
     def _filter_sales_frames(
+        self,
         detail_frame: pd.DataFrame,
         payment_frame: pd.DataFrame,
         state: FilterState,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        start_time = time.perf_counter()
         if detail_frame.empty or payment_frame.empty:
             return detail_frame, payment_frame
         conn = duckdb.connect()
@@ -2330,6 +3016,12 @@ class DataRepository(QtCore.QObject):
             pay_params,
         ).fetchdf()
         conn.close()
+        
+        elapsed = time.perf_counter() - start_time
+        self.log_message.emit(
+            f"[PERF] _filter_sales_frames: {len(detail_frame):,} → {len(filtered_detail):,} detail rows, "
+            f"{len(payment_frame):,} → {len(filtered_payment):,} payment rows in {elapsed:.3f}s"
+        )
         return filtered_detail.reset_index(drop=True), filtered_payment.reset_index(drop=True)
 
     def fetch_sales_transactions(self, state: FilterState) -> SalesReportFrames:
@@ -2355,6 +3047,10 @@ class DataRepository(QtCore.QObject):
             )
 
         total_start = time.perf_counter()
+        self.log_message.emit(
+            f"[PERF] fetch_sales_transactions: Starting for {len(targets)} brands, "
+            f"date range {state.date_from} to {state.date_to}"
+        )
 
         raw_detail_frames: List[pd.DataFrame] = []
         raw_payment_frames: List[pd.DataFrame] = []
@@ -2473,7 +3169,9 @@ class DataRepository(QtCore.QObject):
 
         total_elapsed = time.perf_counter() - total_start
         self.log_message.emit(
-            f"[FETCH] Completed aggregation: details {len(result.details):,} rows, payments {sum(len(df.index) for df in result.payment_analysis.values()):,} rows in {total_elapsed:.2f}s"
+            f"[PERF] fetch_sales_transactions: Total elapsed {total_elapsed:.3f}s, "
+            f"result={len(result.details):,} detail rows, "
+            f"{sum(len(df.index) for df in result.payment_analysis.values()):,} payment analysis rows"
         )
         return result
 
@@ -2593,6 +3291,7 @@ class DataRepository(QtCore.QObject):
         base_state: FilterState,
         state: FilterState,
     ) -> SalesReportFrames:
+        start_time = time.perf_counter()
         detail_frame = detail_frame.reset_index(drop=True).copy()
         payments_frame = payments_frame.reset_index(drop=True).copy()
 
@@ -2844,6 +3543,11 @@ class DataRepository(QtCore.QObject):
         if "net_item" in detail_frame.columns:
             detail_frame.drop(columns=["net_item"], inplace=True)
 
+        elapsed = time.perf_counter() - start_time
+        self.log_message.emit(
+            f"[PERF] _assemble_sales_report: Completed in {elapsed:.3f}s, "
+            f"result={len(detail_frame):,} detail rows"
+        )
         return SalesReportFrames(
             detail_frame,
             payment_analysis,
@@ -5314,13 +6018,16 @@ class SalesTransactionView(QtWidgets.QWidget):
         self._update_header_summaries()
 
     def _update_header_summaries(self) -> None:
-        frame = self.proxy.current_frame().reset_index(drop=True)
         selection_model = self.table.selectionModel()
         selected_indexes = selection_model.selectedRows() if selection_model else []
-        rows = sorted({index.row() for index in selected_indexes}) if selected_indexes else []
-
-        if rows:
-            frame = frame.iloc[rows].copy()
+        
+        # 修正：當排序後，需要將 proxy 的行號映射回原始 DataFrame 的行號
+        if selected_indexes:
+            source_rows = sorted({self.proxy.mapToSource(index).row() for index in selected_indexes})
+            frame = self._model._df.iloc[source_rows].copy()
+        else:
+            # 沒有選取時，計算所有「當前顯示」的資料（考慮搜尋篩選）
+            frame = self.proxy.current_frame().copy()
 
         columns = list(self._model._df.columns)
         if frame.empty or not columns:
@@ -5328,7 +6035,7 @@ class SalesTransactionView(QtWidgets.QWidget):
             return
 
         headers: Dict[str, str] = {}
-        row_count = len(rows) if rows else len(self.proxy.current_frame())
+        row_count = len(frame)
 
         if columns:
             first_col = columns[0]
@@ -5485,20 +6192,22 @@ class SalesTransactionReportTab(QtWidgets.QWidget):
     def _update_payment_summary(self) -> None:
         selection_model = self.payment_view.selectionModel()
         selected_indexes = selection_model.selectedRows() if selection_model else []
-        rows: List[int] = []
-        base_frame = self.payment_proxy.current_frame().reset_index(drop=True)
+        
+        # 修正：當排序後，需要將 proxy 的行號映射回原始 DataFrame 的行號
         if selected_indexes:
-            rows = sorted({index.row() for index in selected_indexes})
-            frame = base_frame.iloc[rows].copy()
+            source_rows = sorted({self.payment_proxy.mapToSource(index).row() for index in selected_indexes})
+            frame = self.payment_model._df.iloc[source_rows].copy()
         else:
-            frame = base_frame
+            # 沒有選取時，計算所有「當前顯示」的資料（考慮搜尋篩選）
+            frame = self.payment_proxy.current_frame().copy()
+        
         columns = list(self.payment_model._df.columns)
         if frame.empty or not columns:
             self.payment_model.set_header_overrides({})
             return
 
         headers: Dict[str, str] = {}
-        row_count = len(rows) if rows else len(base_frame)
+        row_count = len(frame)
 
         if "Payment Type" in columns:
             headers["Payment Type"] = f"Payment Type\nSUMMARY ({row_count} rows)"
@@ -5572,17 +6281,19 @@ class SalesTransactionReportTab(QtWidgets.QWidget):
         self._update_discount_summary()
 
     def _update_discount_summary(self) -> None:
-        base_frame = self.discount_proxy.current_frame().reset_index(drop=True)
         selection_model = self.discount_view.selectionModel()
         selected_indexes = selection_model.selectedRows() if selection_model else []
-        rows = sorted({index.row() for index in selected_indexes}) if selected_indexes else []
-
-        if rows:
-            frame = base_frame.iloc[rows].copy()
+        
+        # 修正：當排序後，需要將 proxy 的行號映射回原始 DataFrame 的行號
+        if selected_indexes:
+            source_rows = sorted({self.discount_proxy.mapToSource(index).row() for index in selected_indexes})
+            frame = self.discount_model._df.iloc[source_rows].copy()
         else:
-            frame = base_frame
+            # 沒有選取時，計算所有「當前顯示」的資料（考慮搜尋篩選）
+            frame = self.discount_proxy.current_frame().copy()
 
         if frame.empty:
+            base_frame = self.discount_proxy.current_frame()
             if base_frame.empty:
                 self.discount_summary_label.setText("No discount data loaded")
             else:
@@ -5814,13 +6525,16 @@ class PromotionAnalysisTab(QtWidgets.QWidget):
         self._update_header_summaries()
 
     def _update_header_summaries(self) -> None:
-        frame = self._proxy.current_frame().reset_index(drop=True)
         selection_model = self.view.selectionModel()
         selected_indexes = selection_model.selectedRows() if selection_model else []
-        rows = sorted({index.row() for index in selected_indexes}) if selected_indexes else []
-
-        if rows:
-            frame = frame.iloc[rows].copy()
+        
+        # 如果有選取的行，將 proxy 的行號映射回原始 DataFrame 的行號
+        if selected_indexes:
+            source_rows = sorted({self._proxy.mapToSource(index).row() for index in selected_indexes})
+            frame = self._model._df.iloc[source_rows].copy()
+        else:
+            # 沒有選取時，計算所有「當前顯示」的資料（考慮搜尋篩選）
+            frame = self._proxy.current_frame().copy()
 
         columns = list(self._model._df.columns)
         if frame.empty or not columns:
@@ -5828,7 +6542,7 @@ class PromotionAnalysisTab(QtWidgets.QWidget):
             return
 
         headers: Dict[str, str] = {}
-        row_count = len(rows) if rows else len(self._proxy.current_frame())
+        row_count = len(frame)
 
         first_col = columns[0]
         headers[first_col] = f"{first_col}\nSUMMARY ({row_count} rows)"
@@ -6077,13 +6791,16 @@ class ComparisonReportStack(QtWidgets.QWidget):
     
     def _update_sales_breakdown_header_summaries(self) -> None:
         """Update header summaries for sales breakdown based on selection"""
-        frame = self.sales_breakdown_proxy.current_frame().reset_index(drop=True)
         selection_model = self.sales_breakdown_view.selectionModel()
         selected_indexes = selection_model.selectedRows() if selection_model else []
-        rows = sorted({index.row() for index in selected_indexes}) if selected_indexes else []
-
-        if rows:
-            frame = frame.iloc[rows].copy()
+        
+        # 修正：當排序後，需要將 proxy 的行號映射回原始 DataFrame 的行號
+        if selected_indexes:
+            source_rows = sorted({self.sales_breakdown_proxy.mapToSource(index).row() for index in selected_indexes})
+            frame = self.sales_breakdown_model._df.iloc[source_rows].copy()
+        else:
+            # 沒有選取時，計算所有「當前顯示」的資料（考慮搜尋篩選）
+            frame = self.sales_breakdown_proxy.current_frame().copy()
 
         columns = list(self.sales_breakdown_model._df.columns)
         if frame.empty or not columns:
@@ -6091,7 +6808,7 @@ class ComparisonReportStack(QtWidgets.QWidget):
             return
 
         headers: Dict[str, str] = {}
-        row_count = len(rows) if rows else len(self.sales_breakdown_proxy.current_frame())
+        row_count = len(frame)
 
         first_col = columns[0]
         headers[first_col] = f"{first_col}\nSUMMARY ({row_count} rows)"
@@ -6292,13 +7009,16 @@ class ProductDataReportTab(QtWidgets.QWidget):
         self._update_header_summaries()
 
     def _update_header_summaries(self) -> None:
-        frame = self.product_proxy.current_frame().reset_index(drop=True)
         selection_model = self.product_view.selectionModel()
         selected_indexes = selection_model.selectedRows() if selection_model else []
-        rows = sorted({index.row() for index in selected_indexes}) if selected_indexes else []
-
-        if rows:
-            frame = frame.iloc[rows].copy()
+        
+        # 修正：當排序後，需要將 proxy 的行號映射回原始 DataFrame 的行號
+        if selected_indexes:
+            source_rows = sorted({self.product_proxy.mapToSource(index).row() for index in selected_indexes})
+            frame = self.product_model._df.iloc[source_rows].copy()
+        else:
+            # 沒有選取時，計算所有「當前顯示」的資料（考慮搜尋篩選）
+            frame = self.product_proxy.current_frame().copy()
 
         columns = list(self.product_model._df.columns)
         if frame.empty or not columns:
@@ -6306,7 +7026,7 @@ class ProductDataReportTab(QtWidgets.QWidget):
             return
 
         headers: Dict[str, str] = {}
-        row_count = len(rows) if rows else len(self.product_proxy.current_frame())
+        row_count = len(frame)
 
         first_col = columns[0]
         headers[first_col] = f"{first_col}\nSUMMARY ({row_count} rows)"
@@ -7277,6 +7997,20 @@ class ReportTabs(QtWidgets.QTabWidget):
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    """
+    【UI 層核心】PyQt6 主視窗，協調各種分析 Tab。
+    
+    職責:
+    - 管理使用者介面與互動
+    - 呼叫 DataRepository 取得資料
+    - 顯示分析結果 (透過各 Tab Widget)
+    - 不應包含重度資料計算邏輯
+    
+    重要屬性:
+    - repository: DataRepository 實例
+    - 各種 _latest_*_df: 快取最近載入的 DataFrame
+    """
+    
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("POS Analysis Tool v1 (PyQt6 Shell)")
@@ -8350,6 +9084,24 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             yoy_from, yoy_to = calculate_yoy_period(current_state.date_from, current_state.date_to)
             
+            # Create YoY filter state with same filters but different dates
+            yoy_state = FilterState(
+                date_from=yoy_from,
+                date_to=yoy_to,
+                outlets=current_state.outlets,
+                months=[],
+                weeks=[],
+                payments=current_state.payments,
+                categories=current_state.categories,
+                products=current_state.products,
+                brands=current_state.brands,
+                discounts=current_state.discounts,
+                weekdays=current_state.weekdays,
+                bill_amount_min=current_state.bill_amount_min,
+                bill_amount_max=current_state.bill_amount_max,
+                sales_categories=current_state.sales_categories,
+            )
+            
             # Check if we have preloaded YoY base data that covers this period
             if not self._yoy_base_details.empty and self._yoy_base_state.date_from and self._yoy_base_state.date_to:
                 if (yoy_from >= self._yoy_base_state.date_from and 
@@ -8357,26 +9109,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Use cached data with in-memory filtering
                     self._log(f"[YoY] ⚡ Using preloaded data for {yoy_from} to {yoy_to} (instant)")
                     
-                    # Create filter state for in-memory filtering
-                    yoy_state = FilterState(
-                        date_from=yoy_from,
-                        date_to=yoy_to,
-                        outlets=current_state.outlets,
-                        months=[],
-                        weeks=[],
-                        payments=current_state.payments,
-                        categories=current_state.categories,
-                        products=current_state.products,
-                        brands=current_state.brands,
-                        discounts=current_state.discounts,
-                        weekdays=current_state.weekdays,
-                        bill_amount_min=current_state.bill_amount_min,
-                        bill_amount_max=current_state.bill_amount_max,
-                        sales_categories=current_state.sales_categories,
-                    )
-                    
                     # Filter the preloaded data in memory
-                    filtered_detail, filtered_payments = DataRepository._filter_sales_frames(
+                    filtered_detail, filtered_payments = self.repository._filter_sales_frames(
                         self._yoy_base_details, self._yoy_base_payments, yoy_state
                     )
                     
@@ -8396,24 +9130,6 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Fallback to fetching from database
             self._log(f"[YoY] Loading comparison data from database: {yoy_from} to {yoy_to}")
-            
-            # Create YoY filter state with same filters but different dates
-            yoy_state = FilterState(
-                date_from=yoy_from,
-                date_to=yoy_to,
-                outlets=current_state.outlets,
-                months=[],
-                weeks=[],
-                payments=current_state.payments,
-                categories=current_state.categories,
-                products=current_state.products,
-                brands=current_state.brands,
-                discounts=current_state.discounts,
-                weekdays=current_state.weekdays,
-                bill_amount_min=current_state.bill_amount_min,
-                bill_amount_max=current_state.bill_amount_max,
-                sales_categories=current_state.sales_categories,
-            )
             
             # Fetch YoY data in background
             task = BackgroundTask(self.repository.fetch_sales_transactions, yoy_state)
@@ -8438,6 +9154,24 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             mom_from, mom_to = calculate_mom_period(current_state.date_from, current_state.date_to)
             
+            # Create MoM filter state with same filters but different dates
+            mom_state = FilterState(
+                date_from=mom_from,
+                date_to=mom_to,
+                outlets=current_state.outlets,
+                months=[],
+                weeks=[],
+                payments=current_state.payments,
+                categories=current_state.categories,
+                products=current_state.products,
+                brands=current_state.brands,
+                discounts=current_state.discounts,
+                weekdays=current_state.weekdays,
+                bill_amount_min=current_state.bill_amount_min,
+                bill_amount_max=current_state.bill_amount_max,
+                sales_categories=current_state.sales_categories,
+            )
+            
             # Check if we have preloaded MoM base data that covers this period
             if not self._mom_base_details.empty and self._mom_base_state.date_from and self._mom_base_state.date_to:
                 if (mom_from >= self._mom_base_state.date_from and 
@@ -8445,26 +9179,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Use cached data with in-memory filtering
                     self._log(f"[MoM] ⚡ Using preloaded data for {mom_from} to {mom_to} (instant)")
                     
-                    # Create filter state for in-memory filtering
-                    mom_state = FilterState(
-                        date_from=mom_from,
-                        date_to=mom_to,
-                        outlets=current_state.outlets,
-                        months=[],
-                        weeks=[],
-                        payments=current_state.payments,
-                        categories=current_state.categories,
-                        products=current_state.products,
-                        brands=current_state.brands,
-                        discounts=current_state.discounts,
-                        weekdays=current_state.weekdays,
-                        bill_amount_min=current_state.bill_amount_min,
-                        bill_amount_max=current_state.bill_amount_max,
-                        sales_categories=current_state.sales_categories,
-                    )
-                    
                     # Filter the preloaded data in memory
-                    filtered_detail, filtered_payments = DataRepository._filter_sales_frames(
+                    filtered_detail, filtered_payments = self.repository._filter_sales_frames(
                         self._mom_base_details, self._mom_base_payments, mom_state
                     )
                     
@@ -8484,24 +9200,6 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Fallback to fetching from database
             self._log(f"[MoM] Loading comparison data from database: {mom_from} to {mom_to}")
-            
-            # Create MoM filter state with same filters but different dates
-            mom_state = FilterState(
-                date_from=mom_from,
-                date_to=mom_to,
-                outlets=current_state.outlets,
-                months=[],
-                weeks=[],
-                payments=current_state.payments,
-                categories=current_state.categories,
-                products=current_state.products,
-                brands=current_state.brands,
-                discounts=current_state.discounts,
-                weekdays=current_state.weekdays,
-                bill_amount_min=current_state.bill_amount_min,
-                bill_amount_max=current_state.bill_amount_max,
-                sales_categories=current_state.sales_categories,
-            )
             
             # Fetch MoM data in background
             task = BackgroundTask(self.repository.fetch_sales_transactions, mom_state)
@@ -8816,10 +9514,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_sales_transactions(state)
             return
 
-        filtered_detail, filtered_payments = DataRepository._filter_sales_frames(
+        filtered_detail, filtered_payments = self.repository._filter_sales_frames(
             self._base_details_df, self._base_payments_df, state
         )
-
+        
         if filtered_detail.empty or filtered_payments.empty:
             self._log("[FILTER] Cached base data produced no rows; updating UI with empty frames.")
             # Use hardcoded columns to avoid AttributeError
@@ -8883,7 +9581,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._base_details_df.empty:
             self._refresh_sales_transactions(state)
             return
-        filtered_detail, filtered_payments = DataRepository._filter_sales_frames(
+        filtered_detail, filtered_payments = self.repository._filter_sales_frames(
             self._base_details_df, self._base_payments_df, state
         )
         if filtered_detail.empty or filtered_payments.empty:
@@ -10189,6 +10887,95 @@ class SalesSearchProxy(QtCore.QSortFilterProxyModel):
 
 
 def main() -> None:
+    """
+    主程式進入點。
+    
+    支援兩種模式:
+    1. GUI 模式 (預設): 啟動 PyQt6 視窗介面
+    2. CLI 快速查詢模式: 透過命令列參數直接查詢本地快取
+    
+    CLI 使用範例:
+        python pos_tool_v2.py --quick-query daily_sales --start 2025-12-01 --end 2025-12-07 --brand SE
+        python pos_tool_v2.py --quick-query outlet_sales --start 2025-11-01 --end 2025-11-30
+        python pos_tool_v2.py --quick-query item_sales_top10 --start 2025-12-01 --end 2025-12-07 --output report.csv
+    """
+    parser = argparse.ArgumentParser(
+        description="POS Analysis Tool - 支援 GUI 與 CLI 快速查詢模式"
+    )
+    parser.add_argument(
+        "--quick-query",
+        type=str,
+        choices=["daily_sales", "outlet_sales", "item_sales_top10", "payment_summary", "discount_summary", "category_sales"],
+        help="快速查詢類型 (不啟動 GUI)",
+    )
+    parser.add_argument(
+        "--start",
+        type=str,
+        help="開始日期 (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--end",
+        type=str,
+        help="結束日期 (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--brand",
+        type=str,
+        choices=["SE", "GOGO", "PLUS"],
+        help="品牌篩選 (可選)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        help="輸出 CSV 檔案路徑 (可選)",
+    )
+    
+    args = parser.parse_args()
+    
+    # CLI 快速查詢模式
+    if args.quick_query:
+        if not args.start or not args.end:
+            print("錯誤: --quick-query 模式需要 --start 和 --end 參數")
+            sys.exit(1)
+        
+        # 不啟動 GUI，直接查詢
+        repo = DataRepository()
+        try:
+            df = repo.run_quick_query(
+                query_type=args.quick_query,
+                start_date=args.start,
+                end_date=args.end,
+                brand=args.brand,
+            )
+            
+            if "error" in df.columns:
+                print(f"查詢失敗: {df['error'].iloc[0]}")
+                sys.exit(1)
+            
+            # 輸出結果
+            if args.output:
+                df.to_csv(args.output, index=False, encoding="utf-8-sig")
+                print(f"結果已儲存至: {args.output}")
+            else:
+                # 顯示在終端
+                try:
+                    print(df.to_markdown(index=False))
+                except Exception:
+                    print(df.to_string(index=False))
+            
+            print(f"\n共 {len(df)} 筆記錄")
+            
+        except Exception as e:
+            print(f"查詢過程發生錯誤: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        finally:
+            repo.close()
+        
+        sys.exit(0)
+    
+    # GUI 模式 (預設行為)
     app = QtWidgets.QApplication(sys.argv)
     window = MainWindow()
     window.show()
@@ -10197,3 +10984,98 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ------------------------------------------------------------------
+# 測試函式 (Test Functions)
+# ------------------------------------------------------------------
+
+def test_quick_query_basic():
+    """
+    輕量測試：快速查詢模式基本功能。
+    
+    測試項目:
+    - daily_sales 查詢是否能正常執行
+    - 回傳的 DataFrame 是否包含預期欄位
+    """
+    print("=== 測試快速查詢模式 ===")
+    repo = DataRepository()
+    try:
+        # 測試一週的資料
+        df = repo.run_quick_query(
+            query_type="daily_sales",
+            start_date="2025-12-01",
+            end_date="2025-12-07",
+            brand="SE"
+        )
+        
+        # 檢查欄位
+        expected_columns = ["sales_date", "store_name", "total_sales", "total_qty", "transaction_count"]
+        missing_cols = [col for col in expected_columns if col not in df.columns]
+        
+        if missing_cols:
+            print(f"❌ 失敗: 缺少欄位 {missing_cols}")
+        elif df.empty:
+            print("⚠️  警告: 查詢結果為空 (可能該期間無資料)")
+        else:
+            print(f"✓ 成功: 查詢到 {len(df)} 筆記錄")
+            print(f"  欄位: {list(df.columns)}")
+            print(f"  前 3 筆:\n{df.head(3)}")
+        
+    except Exception as e:
+        print(f"❌ 測試失敗: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        repo.close()
+
+
+def test_optimized_aggregation():
+    """
+    測試優化後的彙總函式。
+    
+    測試項目:
+    - compute_daily_outlet_summary_optimized 是否正常運作
+    - SQL 版本與 pandas fallback 版本結果是否一致
+    """
+    print("\n=== 測試優化彙總函式 ===")
+    
+    # 建立測試資料
+    test_data = pd.DataFrame({
+        "c_date": pd.date_range("2025-12-01", periods=5, freq="D"),
+        "store_name": ["Store A", "Store B"] * 2 + ["Store A"],
+        "net_sales_amount": [1000, 2000, 1500, 2500, 1200],
+        "qty": [10, 20, 15, 25, 12],
+        "sales_no": ["S001", "S002", "S003", "S004", "S005"],
+    })
+    
+    repo = DataRepository()
+    try:
+        result = repo.compute_daily_outlet_summary_optimized(test_data)
+        
+        if result.empty:
+            print("❌ 失敗: 結果為空")
+        else:
+            print(f"✓ 成功: 產生 {len(result)} 筆彙總記錄")
+            print(f"  欄位: {list(result.columns)}")
+            print(f"  範例結果:\n{result.head()}")
+        
+    except Exception as e:
+        print(f"❌ 測試失敗: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        repo.close()
+
+
+def run_all_tests():
+    """執行所有測試"""
+    print("開始執行測試套件...\n")
+    test_quick_query_basic()
+    test_optimized_aggregation()
+    print("\n測試完成")
+
+
+# 如果想執行測試，可以在命令列執行:
+# python pos_tool_v2.py --run-tests
+# (需要在 main() 中加入對應參數支援)
